@@ -1,4 +1,4 @@
 [submodule "shenango"]
 	path = shenango
-	url = git@github.com:inhocho89/shenango-protego.git
-  branch = protego
+	url = https://github.com/inhocho89/shenango-protego.git
+	branch = protego
