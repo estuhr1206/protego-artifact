@@ -6,5 +6,4 @@
 	url = https://github.com/shenango/parsec.git
 [submodule "caladan"]
 	path = caladan
-	url = https://github.com/inhocho89/shenango-protego.git
-	branch = protego
+	url = https://github.com/shenango/caladan.git
