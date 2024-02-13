@@ -46,7 +46,7 @@ NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
 
-DOWNLOAD_RAW = True
+DOWNLOAD_RAW = False
 
 ENABLE_ANTAGONIST = False
 
@@ -74,10 +74,10 @@ antagonist_param = "randmem:{:d}:{:d}".format(antagonist_mem_size, random_seed)
 NET_RTT = 10
 slo = (ST_AVG + NET_RTT) * 10
 # slo = 200
-slo = 999999
+# slo = 999999
 
 # Verify configs #
-if OVERLOAD_ALG not in ["protego", "breakwater", "seda", "dagor", "nocontrol"]:
+if OVERLOAD_ALG not in ["breakwater", "seda", "dagor", "nocontrol"]:
     print("Unknown overload algorithm: " + OVERLOAD_ALG)
     exit()
 
@@ -321,9 +321,9 @@ for offered_load in OFFERED_LOADS:
     print("\tExecuting client...")
     client_agent_sessions = []
     cmd = "cd ~/{} && sudo ./{}/breakwater/apps/netbench/netbench"\
-            " {} client.config client {:d} {:f} {} {:d} {:d} {:d} {} {:d}"\
+            " {} client.config client {:d} {} {:d} {} {:d} {:d} {:d}"\
             " >stdout.out 2>&1".format(ARTIFACT_PATH, KERNEL_NAME, OVERLOAD_ALG, NUM_CONNS,
-                    ST_AVG, ST_DIST, slo, NUM_AGENT, offered_load, server_ip, 1)
+                    server_ip, ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load)
     client_agent_sessions += execute_remote([client_conn], cmd, False)
 
     sleep(1)
@@ -478,16 +478,16 @@ if IAS_DEBUG:
     cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
           " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/stdout.out {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
     execute_local(cmd)
+    if DOWNLOAD_RAW:
+        print("stdout client node 1")
+        cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+            " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/server_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
+        execute_local(cmd)
 
-    print("stdout client node 1")
-    cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
-          " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/server_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
-    execute_local(cmd)
-
-    print("client dropped tasks")
-    cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
-          " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/client_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
-    execute_local(cmd)
+        print("client dropped tasks")
+        cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+            " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/client_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
+        execute_local(cmd)
 
 print("gathering config options for this experiment")
 config_dir = run_dir + "/config"
@@ -518,7 +518,7 @@ if ENABLE_ANTAGONIST:
     script_config += "antagonist threads: {}, work_unit {}, command line arg: {}\n".format(threads, work_units, antagonist_param)
 script_config += "RTT: {}\n".format(NET_RTT)
 script_config += "SLO: {}\n".format(slo)
-cmd = "echo {} > {}/script.config".format(script_config, config_dir)
+cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 
 

@@ -18,10 +18,10 @@ index 005535d..1ea6111 100644
 -CONFIG_DIRECTPATH=n
 +CONFIG_DIRECTPATH=y
 diff --git a/iokernel/dpdk.c b/iokernel/dpdk.c
-index 0b48209..94060ab 100644
+index 3d3e0a8..5051ece 100644
 --- a/iokernel/dpdk.c
 +++ b/iokernel/dpdk.c
-@@ -239,7 +239,7 @@ int dpdk_init(void)
+@@ -231,7 +231,7 @@ int dpdk_init(void)
  int dpdk_late_init(void)
  {
  	/* initialize port */
@@ -31,28 +31,15 @@ index 0b48209..94060ab 100644
  		log_err("dpdk: cannot init port %"PRIu8 "\n", dp.port);
  		return -1;
 diff --git a/runtime/net/directpath/mlx5/mlx5_init.c b/runtime/net/directpath/mlx5/mlx5_init.c
-index 92e6c86..484757e 100644
+index d2236ec..b11f2f0 100644
 --- a/runtime/net/directpath/mlx5/mlx5_init.c
 +++ b/runtime/net/directpath/mlx5/mlx5_init.c
-@@ -376,7 +376,7 @@ int mlx5_common_init(struct hardware_q **rxq_out, struct direct_txq **txq_out,
+@@ -334,7 +334,7 @@ int mlx5_common_init(struct hardware_q **rxq_out, struct direct_txq **txq_out,
+ 
+ 	i = 0;
+ 	while ((ib_dev = dev_list[i])) {
+-		if (strncmp(ibv_get_device_name(ib_dev), "mlx5", 4) == 0)
++		if (strncmp(ibv_get_device_name(ib_dev), "mlx5_3", 6) == 0)
+ 			break;
+ 		i++;
  	}
- 
- 	for (i = 0; dev_list[i]; i++) {
--		if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
-+		if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5_3", 6))
- 			continue;
- 
- 		if (!cfg_pci_addr_specified)
-diff --git a/inc/base/tcache.h b/inc/base/tcache.h
-index 2488102..60e7556 100644
---- a/inc/base/tcache.h
-+++ b/inc/base/tcache.h
-@@ -11,7 +11,7 @@
- #include <base/thread.h>
- 
- #define TCACHE_MAX_MAG_SIZE	64
--#define TCACHE_DEFAULT_MAG_SIZE	8
-+#define TCACHE_DEFAULT_MAG_SIZE	64
- 
- struct tcache;
-
