@@ -692,12 +692,25 @@ std::vector<work_unit> RunExperiment(
   uint64_t good_resps = 0;
   uint64_t offered = 0;
 
+  // ERIC
+  uint64_t client_drop = 0;
+  std::vector<work_unit> client_drop_tasks;
+  // END ERIC
+
   for (int i = 0; i < threads; ++i) {
     auto &v = *samples[i];
     double throughput;
     int slo_success;
 
     offered += v.size();
+    // ERIC
+    client_drop += std::count_if(v.begin(), v.end(), [](const work_unit &s) {
+      return (s.duration_us == 0);
+    });
+    std::copy_if(v.begin(), v.end(), std::back_inserter(client_drop_tasks), [](const work_unit &s) {
+                          return (s.duration_us == 0);
+                        });
+    // END ERIC
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const work_unit &s) {
@@ -721,6 +734,20 @@ std::vector<work_unit> RunExperiment(
 
     w.insert(w.end(), v.begin(), v.end());
   }
+
+  // ERIC
+  // sort my vector (if possible), and outfile it
+  std::ofstream client_drop_tasks_file;
+  client_drop_tasks_file.open ("client_drop_tasks.csv");
+  client_drop_tasks_file << "start_us,work_us,duration_us,tsc,server_queue,server_time" << std::endl;
+  client_drop_tasks_file << std::setprecision(8) << std::fixed;
+  for (unsigned int i = 0; i < client_drop_tasks.size(); ++i) {
+    client_drop_tasks_file << client_drop_tasks[i].start_us << "," << client_drop_tasks[i].work_us << ","
+                           << int(client_drop_tasks[i].duration_us) << "," << client_drop_tasks[i].tsc << ","
+                           << client_drop_tasks[i].server_queue << "," << client_drop_tasks[i].server_time << std::endl;
+  }
+  client_drop_tasks_file.close();
+  // END ERIC
 
   // Report results.
   if (csr) {
@@ -915,11 +942,62 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
     reject_p50 = rejected[(reject_cnt - 1) * 0.5].duration_us;
     reject_p99 = rejected[(reject_cnt - 1) * 0.99].duration_us;
   }
+  // ERIC
+  std::vector<work_unit> server_drop_tasks;
+  std::copy_if(w.begin(), w.end(), std::back_inserter(server_drop_tasks), [](const work_unit &s) {
+                        return !s.success;
+                      });
+  // sort this once I know the the other fields are valid
+  // std::sort(server_drop_tasks.begin(), server_drop_tasks.end(), [](const work_unit &s1, const work_unit &s2) {
+  //   return s1.start_us < s2.start_us;
+  // });
+  std::ofstream server_drop_tasks_file;
+  server_drop_tasks_file.open ("server_drop_tasks.csv");
+  server_drop_tasks_file << "start_us,work_us,duration_us,tsc,server_queue,server_time" << std::endl;
+  server_drop_tasks_file << std::setprecision(8) << std::fixed;
+  for (unsigned int i = 0; i < server_drop_tasks.size(); ++i) {
+    server_drop_tasks_file << server_drop_tasks[i].start_us << "," << server_drop_tasks[i].work_us << ","
+                           << int(server_drop_tasks[i].duration_us) << "," << server_drop_tasks[i].tsc << ","
+                           << server_drop_tasks[i].server_queue << "," << server_drop_tasks[i].server_time << std::endl;
+  }
+  server_drop_tasks_file.close();
+  // END ERIC
 
   w.erase(std::remove_if(w.begin(), w.end(),
 			 [](const work_unit &s) {
 			   return !s.success;
 	}), w.end());
+
+  ///// ERIC
+  // ordering by start times
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.start_us < s2.start_us;
+  });
+  
+  /*
+  work unit struct:
+    double start_us, work_us, duration_us;
+    // duration_us is calculated from two ints, so it is always an int
+    int hash;
+    bool success;
+    bool is_monster;
+    uint64_t credit;
+    uint64_t tsc;
+    uint32_t cpu;
+    uint64_t server_queue;
+    uint64_t server_time;
+    uint64_t timing;
+  */
+  std::ofstream all_tasks_file;
+  all_tasks_file.open ("all_tasks.csv");
+  all_tasks_file << "start_us,work_us,duration_us,tsc,server_queue,server_time" << std::endl;
+  all_tasks_file << std::setprecision(8) << std::fixed;
+  for (unsigned int i = 0; i < w.size(); ++i) {
+    all_tasks_file << w[i].start_us << "," << w[i].work_us << "," << int(w[i].duration_us) << ","
+                   << w[i].tsc << "," << w[i].server_queue << "," << w[i].server_time << std::endl;
+  }
+  all_tasks_file.close();
+  ///// END ERIC
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.duration_us < s2.duration_us;
