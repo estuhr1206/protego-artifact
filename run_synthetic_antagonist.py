@@ -13,13 +13,13 @@ import random
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "nocontrol"
+OVERLOAD_ALG = "breakwater"
 
 # The number of client connections
 NUM_CONNS = 10
 
 # Average service time (in us)
-ST_AVG = 1
+ST_AVG = 10
 
 # Service time distribution
 #    exp: exponential
@@ -32,7 +32,7 @@ ST_DIST = "exp"
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
-OFFERED_LOADS = [1600000]
+OFFERED_LOADS = [800000]
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
@@ -41,7 +41,8 @@ ENABLE_DIRECTPATH = True
 SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
-NUM_CORES_SERVER = 8
+NUM_CORES_SERVER = 18
+NUM_CORES_LC = 16
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
@@ -53,7 +54,7 @@ ENABLE_ANTAGONIST = False
 IAS_DEBUG = True
 
 # number of threads for antagonist
-threads = 4
+threads = 18
 # units of work each thread attempts at once
 work_units = 10
 # config string describing what type of antagonist worker, and other variables
@@ -72,8 +73,8 @@ antagonist_param = "randmem:{:d}:{:d}".format(antagonist_mem_size, random_seed)
 
 # SLO = 10 * (average RPC processing time + network RTT)
 NET_RTT = 10
-slo = (ST_AVG + NET_RTT) * 10
-# slo = 200
+# slo = (ST_AVG + NET_RTT) * 10
+slo = 200
 # slo = 999999
 
 # Verify configs #
@@ -209,8 +210,8 @@ if IAS_DEBUG:
 # Generating config files
 print("Generating config files...")
 generate_shenango_config(True, server_conn, server_ip, netmask, gateway,
-                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
-                         latency_critical=True, guaranteed_kthread=NUM_CORES_SERVER)
+                         NUM_CORES_LC, ENABLE_DIRECTPATH, True, DISABLE_WATCHDOG,
+                         latency_critical=True, guaranteed_kthread=16)
 generate_shenango_config(True, server_conn, antagonist_ip, netmask, gateway,
                          NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
                          latency_critical=False, guaranteed_kthread=0, antagonist="antagonist.config")
