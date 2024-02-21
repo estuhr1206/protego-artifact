@@ -32,22 +32,23 @@ ST_DIST = "exp"
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
-OFFERED_LOADS = [800000]
+OFFERED_LOADS = [850000]
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
+SPIN_SERVER = True # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
 NUM_CORES_SERVER = 18
 NUM_CORES_LC = 16
+NUM_CORES_LC_GUARANTEED = 16
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
 
-DOWNLOAD_RAW = False
+DOWNLOAD_RAW = True
 
 ENABLE_ANTAGONIST = False
 
@@ -210,8 +211,8 @@ if IAS_DEBUG:
 # Generating config files
 print("Generating config files...")
 generate_shenango_config(True, server_conn, server_ip, netmask, gateway,
-                         NUM_CORES_LC, ENABLE_DIRECTPATH, True, DISABLE_WATCHDOG,
-                         latency_critical=True, guaranteed_kthread=16)
+                         NUM_CORES_LC, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
+                         latency_critical=True, guaranteed_kthread=NUM_CORES_LC_GUARANTEED)
 generate_shenango_config(True, server_conn, antagonist_ip, netmask, gateway,
                          NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
                          latency_critical=False, guaranteed_kthread=0, antagonist="antagonist.config")
@@ -513,6 +514,10 @@ script_config += "service time distribution: {}\n".format(ST_DIST)
 script_config += "average service time: {}\n".format(ST_AVG)
 script_config += "offered load: {}\n".format(OFFERED_LOADS[0])
 script_config += "server cores: {}\n".format(NUM_CORES_SERVER)
+script_config += "LC cores: {}\n".format(NUM_CORES_LC)
+script_config += "LC guaranteed cores: {}\n".format(NUM_CORES_LC_GUARANTEED)
+if SPIN_SERVER:
+    script_config += "server cores spinning for LC\n"
 script_config += "client cores: {}\n".format(NUM_CORES_CLIENT)
 script_config += "caladan threshold: {}\n".format(CALADAN_THRESHOLD)
 if ENABLE_ANTAGONIST:
@@ -522,7 +527,11 @@ script_config += "SLO: {}\n".format(slo)
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 
-
+# produce the cores if applicable
+if IAS_DEBUG:
+    print("creating cores csv")
+    cmd = "cd {} && python3 ../../../graph_scripts/create_corecsv.py".format(run_dir)
+    execute_local(cmd)
 
 print("Done.")
 # TODO make sure the output stuff is consistent across run scripts
