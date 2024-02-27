@@ -19,7 +19,12 @@ OVERLOAD_ALG = "breakwater"
 NUM_CONNS = 10
 
 # Average service time (in us)
-ST_AVG = 1
+ST_AVG = 10
+
+# make sure these match in bw_config.h
+# Too lazy to do a sed command or similar right now TODO
+BW_TARGET = 80
+BW_THRESHOLD = 160
 
 # Service time distribution
 #    exp: exponential
@@ -42,7 +47,8 @@ SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic 
 DISABLE_WATCHDOG = False
 
 NUM_CORES_SERVER = 18
-NUM_CORES_LC = 18
+NUM_CORES_LC = 16
+NUM_CORES_LC_GUARANTEED = 16
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
@@ -52,6 +58,8 @@ DOWNLOAD_RAW = False
 ENABLE_ANTAGONIST = False
 
 IAS_DEBUG = False
+
+ERIC_CSV_NAMING = False
 
 # number of threads for antagonist
 threads = 18
@@ -211,9 +219,9 @@ if IAS_DEBUG:
 print("Generating config files...")
 generate_shenango_config(True, server_conn, server_ip, netmask, gateway,
                          NUM_CORES_LC, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
-                         latency_critical=True, guaranteed_kthread=NUM_CORES_LC)
+                         latency_critical=True, guaranteed_kthread=NUM_CORES_LC_GUARANTEED)
 generate_shenango_config(True, server_conn, antagonist_ip, netmask, gateway,
-                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
+                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, False, DISABLE_WATCHDOG,
                          latency_critical=False, guaranteed_kthread=0, antagonist="antagonist.config")
 generate_shenango_config(False, client_conn, client_ip, netmask, gateway,
                          NUM_CORES_CLIENT, ENABLE_DIRECTPATH, True, False)
@@ -388,33 +396,42 @@ cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}@{}:~/{}/output.csv ./"\
 execute_local(cmd)
 
 output_prefix = "{}".format(OVERLOAD_ALG)
+eric_prefix = "{}".format(OVERLOAD_ALG)
+
+if OVERLOAD_ALG == "breakwater":
+    eric_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+    output_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+
+if NUM_CORES_LC_GUARANTEED > 0:
+    eric_prefix += "_guaranteed"
 
 if SPIN_SERVER:
     output_prefix += "_spin"
+    eric_prefix += "_spinning"
 
 if DISABLE_WATCHDOG:
     output_prefix += "_nowd"
 
 if ENABLE_ANTAGONIST:
     output_prefix += "_antagonist"
+    eric_prefix += "_antagonist"
+
 output_prefix += "_{:d}cores".format(NUM_CORES_SERVER)
 output_prefix += "_{:d}load".format(OFFERED_LOADS[0])
+# Assuming 16 cores consistently for now, so not adding cores to prefix
+eric_prefix += "_{:d}k".format(int(OFFERED_LOADS[0] / 1000))
 
 output_prefix += "_{}_{:d}_nconn_{:d}".format(ST_DIST, ST_AVG, NUM_CONNS)
 
 # Print Headers
-header = "num_clients,offered_load,throughput,goodput,cpu"\
-        ",min,mean,p50,p90,p99,p999,p9999,max"\
-        ",reject_min,reject_mean,reject_p50,reject_p99"\
-        ",p1_credit,mean_credit,p99_credit"\
-        ",p1_q,mean_q,p99_q,mean_stime,p99_stime,server:rx_pps,server:tx_pps"\
-        ",server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
-        ",server:cupdate_rx_pps,server:ecredit_tx_pps,server:credit_tx_cps"\
-        ",server:req_rx_pps,server:req_drop_rate,server:resp_tx_pps"\
-        ",client:min_tput,client:max_tput"\
-        ",client:ecredit_rx_pps,client:cupdate_tx_pps"\
-        ",client:resp_rx_pps,client:req_tx_pps"\
-        ",client:credit_expired_cps,client:req_dropped_rps"
+header = "num_clients,offered_load,throughput,goodput,cpu,min,mean,p50,p90,p99,p999,p9999"\
+        ",max,reject_min,reject_mean,reject_p50,reject_p99,p1_win,mean_win,p99_win,p1_q,mean_q,p99_q"\
+		",mean_stime,p99_stime,server:rx_pps"\
+        ",server:tx_pps,server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
+        ",server:winu_rx_pps,server:winu_tx_pps,server:win_tx_wps,server:req_rx_pps"\
+        ",server:req_drop_rate,server:resp_tx_pps,client:min_tput,client:max_tput"\
+        ",client:winu_rx_pps,client:resp_rx_pps,client:req_tx_pps"\
+        ",client:win_expired_wps,client:req_dropped_rps"
 
 curr_date = datetime.now().strftime("%m_%d_%Y")
 curr_time = datetime.now().strftime("%H-%M-%S")
@@ -431,6 +448,9 @@ execute_local(cmd)
 
 cmd = "cat output.csv >> {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix)
 execute_local(cmd)
+
+if ERIC_CSV_NAMING:
+    cmd = "mv {}/{}.csv {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix, run_dir, eric_prefix)
 
 if DOWNLOAD_RAW:
     print("Fetching raw output (all non rejected tasks)")
@@ -514,6 +534,10 @@ script_config += "average service time: {}\n".format(ST_AVG)
 script_config += "offered load: {}\n".format(OFFERED_LOADS[0])
 script_config += "server cores: {}\n".format(NUM_CORES_SERVER)
 script_config += "client cores: {}\n".format(NUM_CORES_CLIENT)
+script_config += "LC cores: {}\n".format(NUM_CORES_LC)
+script_config += "LC guaranteed cores: {}\n".format(NUM_CORES_LC_GUARANTEED)
+if SPIN_SERVER:
+    script_config += "server cores spinning for LC\n"
 script_config += "caladan threshold: {}\n".format(CALADAN_THRESHOLD)
 if ENABLE_ANTAGONIST:
     script_config += "antagonist threads: {}, work_unit {}, command line arg: {}\n".format(threads, work_units, antagonist_param)
@@ -522,7 +546,11 @@ script_config += "SLO: {}\n".format(slo)
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 
-
+# produce the cores if applicable
+if IAS_DEBUG:
+    print("creating cores csv")
+    cmd = "cd {} && python3 ../../../graph_scripts/create_corecsv.py".format(run_dir)
+    execute_local(cmd)
 
 print("Done.")
 # TODO make sure the output stuff is consistent across run scripts

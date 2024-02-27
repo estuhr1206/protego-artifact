@@ -7,7 +7,6 @@ extern "C" {
 #include <breakwater/seda.h>
 #include <breakwater/dagor.h>
 #include <breakwater/nocontrol.h>
-#include <breakwater/sync.h>
 }
 
 #include "cc/net.h"
@@ -18,10 +17,7 @@ extern "C" {
 #include "breakwater/rpc++.h"
 
 #include "synthetic_worker.h"
-#include "loadbalancer.h"
-#include "fanouter.h"
 
-#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -55,10 +51,7 @@ using sec = duration<double, std::micro>;
 // the number of worker threads to spawn.
 int threads;
 // the remote UDP address of the server.
-int num_servers;
-int nconn[16];
-netaddr raddr[16];
-netaddr master;
+netaddr raddr, master;
 // the mean service time in us.
 double st;
 // service time distribution type
@@ -76,29 +69,15 @@ int total_agents = 1;
 // number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 69;  // 83
 // Total duration of the experiment in us
-constexpr uint64_t kWarmUpTime = 4000000;
-constexpr uint64_t kExperimentTime = 8000000;
+constexpr uint64_t kWarmUpTime = 2000000;
+constexpr uint64_t kExperimentTime = 4000000;
 // RTT
 constexpr uint64_t kRTT = 10;
-constexpr uint64_t kNumDupClient = 32;
 
 std::vector<double> offered_loads;
 double offered_load;
 
 static SyntheticWorker *workers[NCPU];
-
-struct payload {
-  uint64_t work_iterations;
-  uint64_t index;
-  uint64_t tsc_end;
-  uint32_t cpu;
-  uint64_t server_queue;
-  uint64_t hash;
-};
-constexpr int PAYLOAD_ID_OFF = offsetof(payload, index);
-
-rpc::LoadBalancer<payload, PAYLOAD_ID_OFF> *load_balancer[16];
-rpc::FanOuter<payload, PAYLOAD_ID_OFF> *fan_outer;
 
 /* server-side stat */
 constexpr uint64_t kRPCSStatPort = 8002;
@@ -108,9 +87,9 @@ struct sstat_raw {
   uint64_t busy;
   unsigned int num_cores;
   unsigned int max_cores;
-  uint64_t cupdate_rx;
-  uint64_t ecredit_tx;
-  uint64_t credit_tx;
+  uint64_t winu_rx;
+  uint64_t winu_tx;
+  uint64_t win_tx;
   uint64_t req_rx;
   uint64_t req_dropped;
   uint64_t resp_tx;
@@ -135,9 +114,9 @@ struct sstat {
   double tx_bps;
   double rx_drops_pps;
   double rx_ooo_pps;
-  double cupdate_rx_pps;
-  double ecredit_tx_pps;
-  double credit_tx_cps;
+  double winu_rx_pps;
+  double winu_tx_pps;
+  double win_tx_wps;
   double req_rx_pps;
   double req_drop_rate;
   double resp_tx_pps;
@@ -150,11 +129,11 @@ struct cstat_raw {
   double goodput;
   double min_percli_tput;
   double max_percli_tput;
-  uint64_t ecredit_rx;
-  uint64_t cupdate_tx;
+  uint64_t winu_rx;
+  uint64_t winu_tx;
   uint64_t resp_rx;
   uint64_t req_tx;
-  uint64_t credit_expired;
+  uint64_t win_expired;
   uint64_t req_dropped;
 };
 
@@ -164,25 +143,23 @@ struct cstat {
   double goodput;
   double min_percli_tput;
   double max_percli_tput;
-  double ecredit_rx_pps;
-  double cupdate_tx_pps;
+  double winu_rx_pps;
+  double winu_tx_pps;
   double resp_rx_pps;
   double req_tx_pps;
-  double credit_expired_cps;
+  double win_expired_wps;
   double req_dropped_rps;
 };
 
 struct work_unit {
   double start_us, work_us, duration_us;
   int hash;
-  bool success;
-  bool is_monster;
-  uint64_t credit;
+  uint64_t window;
   uint64_t tsc;
   uint32_t cpu;
   uint64_t server_queue;
   uint64_t server_time;
-  uint64_t timing;
+  bool success;
 };
 
 class NetBarrier {
@@ -202,13 +179,11 @@ class NetBarrier {
       conns.emplace_back(c);
       BUG_ON(c->WriteFull(&threads, sizeof(threads)) <= 0);
       BUG_ON(c->WriteFull(&st, sizeof(st)) <= 0);
+      BUG_ON(c->WriteFull(&raddr, sizeof(raddr)) <= 0);
       BUG_ON(c->WriteFull(&total_agents, sizeof(total_agents)) <= 0);
       BUG_ON(c->WriteFull(&st_type, sizeof(st_type)) <= 0);
       BUG_ON(c->WriteFull(&slo, sizeof(slo)) <= 0);
       BUG_ON(c->WriteFull(&offered_load, sizeof(offered_load)) <= 0);
-      BUG_ON(c->WriteFull(&num_servers, sizeof(num_servers)) <= 0);
-      BUG_ON(c->WriteFull(raddr, sizeof(netaddr) * num_servers) <= 0);
-      BUG_ON(c->WriteFull(nconn, sizeof(int) * num_servers) <= 0);
       for (size_t j = 0; j < npara; j++) {
         rt::TcpConn *c = aggregator_->Accept();
         if (c == nullptr) panic("couldn't accept a connection");
@@ -224,13 +199,11 @@ class NetBarrier {
     is_leader_ = false;
     BUG_ON(c->ReadFull(&threads, sizeof(threads)) <= 0);
     BUG_ON(c->ReadFull(&st, sizeof(st)) <= 0);
+    BUG_ON(c->ReadFull(&raddr, sizeof(raddr)) <= 0);
     BUG_ON(c->ReadFull(&total_agents, sizeof(total_agents)) <= 0);
     BUG_ON(c->ReadFull(&st_type, sizeof(st_type)) <= 0);
     BUG_ON(c->ReadFull(&slo, sizeof(slo)) <= 0);
     BUG_ON(c->ReadFull(&offered_load, sizeof(offered_load)) <= 0);
-    BUG_ON(c->ReadFull(&num_servers, sizeof(num_servers)) <= 0);
-    BUG_ON(c->ReadFull(raddr, sizeof(netaddr) * num_servers) <= 0);
-    BUG_ON(c->ReadFull(nconn, sizeof(int) * num_servers) <= 0);
     for (size_t i = 0; i < npara; i++) {
       auto c = rt::TcpConn::Dial({0, 0}, {master.ip, kBarrierPort + 1});
       BUG_ON(c == nullptr);
@@ -268,11 +241,11 @@ class NetBarrier {
             MIN(rem_csr.min_percli_tput, csr->min_percli_tput);
         csr->max_percli_tput =
             MAX(rem_csr.max_percli_tput, csr->max_percli_tput);
-        csr->ecredit_rx += rem_csr.ecredit_rx;
-        csr->cupdate_tx += rem_csr.cupdate_tx;
+        csr->winu_rx += rem_csr.winu_rx;
+        csr->winu_tx += rem_csr.winu_tx;
         csr->resp_rx += rem_csr.resp_rx;
         csr->req_tx += rem_csr.req_tx;
-        csr->credit_expired += rem_csr.credit_expired;
+        csr->win_expired += rem_csr.win_expired;
         csr->req_dropped += rem_csr.req_dropped;
       }
     } else {
@@ -366,9 +339,9 @@ void RPCSStatWorker(std::unique_ptr<rt::TcpConn> c) {
                    user + nice + system + irq + softirq + steal,
                    rt::RuntimeMaxCores(),
                    static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_ONLN)),
-                   rpc::RpcServerStatCupdateRx(),
-                   rpc::RpcServerStatEcreditTx(),
-                   rpc::RpcServerStatCreditTx(),
+                   rpc::RpcServerStatWinuRx(),
+                   rpc::RpcServerStatWinuTx(),
+                   rpc::RpcServerStatWinTx(),
                    rpc::RpcServerStatReqRx(),
                    rpc::RpcServerStatReqDropped(),
                    rpc::RpcServerStatRespTx()};
@@ -398,7 +371,7 @@ void RPCSStatServer() {
 
 sstat_raw ReadRPCSStat() {
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddr[0].ip, kRPCSStatPort}));
+      rt::TcpConn::Dial({0, 0}, {raddr.ip, kRPCSStatPort}));
   uint64_t magic = hton64(kRPCSStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
@@ -407,8 +380,8 @@ sstat_raw ReadRPCSStat() {
   ret = c->ReadFull(&u, sizeof(u));
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("sstat response failed, ret = %ld", ret);
-  return sstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.cupdate_rx,
-                   u.ecredit_tx, u.credit_tx, u.req_rx, u.req_dropped, u.resp_tx};
+  return sstat_raw{u.idle,    u.busy,   u.num_cores, u.max_cores,   u.winu_rx,
+                   u.winu_tx, u.win_tx, u.req_rx,    u.req_dropped, u.resp_tx};
 }
 
 shstat_raw ReadShenangoStat() {
@@ -416,7 +389,7 @@ shstat_raw ReadShenangoStat() {
   std::string buf;
   std::map<std::string, uint64_t> smap;
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddr[0].ip, kShenangoStatPort}));
+      rt::TcpConn::Dial({0, 0}, {raddr.ip, kShenangoStatPort}));
   uint64_t magic = hton64(kShenangoStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
@@ -462,18 +435,17 @@ shstat_raw ReadShenangoStat() {
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
-
+struct payload {
+  bool success;
+  uint64_t work_iterations;
+  uint64_t index;
+  uint64_t tsc_end;
+  uint32_t cpu;
+  uint64_t server_queue;
+};
 
 // The maximum lateness to tolerate before dropping egress samples.
 constexpr uint64_t kMaxCatchUpUS = 5;
-
-#define BOTTLENECK_N 2
-
-//static rt::Mutex shared_mutex;
-static mutex_t shared_mutex[BOTTLENECK_N];
-static spinlock_t shared_spin[BOTTLENECK_N];
-static rt::CondVar shared_cv;
-static int running;
 
 void RpcServer(struct srpc_ctx *ctx) {
   // Validate and parse the request.
@@ -485,30 +457,16 @@ void RpcServer(struct srpc_ctx *ctx) {
 
   // Perform the synthetic work.
   uint64_t workn = ntoh64(in->work_iterations);
-  uint64_t hash = ntoh64(in->hash);
   int core_id = get_current_affinity();
   SyntheticWorker *w = workers[core_id];
-  int stype = ctx->s->session_type;
 
-  int midx;
-
-  if (hash % 1000 < 200) midx = 0;
-  else midx = 1;
-
-  if (workn != 0) {
-    if (mutex_lock_if_uncongested(&shared_mutex[midx])) {
-      workers[get_current_affinity()]->Work(workn);
-      mutex_unlock(&shared_mutex[midx]);
-    } else {
-      ctx->drop = true;
-      return;
-    }
-  }
+  if (workn != 0) w->Work(workn);
 
   // Craft a response.
   ctx->resp_len = sizeof(payload);
   payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
   memcpy(out, in, sizeof(*out));
+  out->success = true;
   out->tsc_end = hton64(rdtscp(&out->cpu));
   out->cpu = hton32(out->cpu);
   out->server_queue = hton64(rt::RuntimeQueueUS());
@@ -523,210 +481,24 @@ void ServerHandler(void *arg) {
     if (workers[i] == nullptr) panic("cannot create worker");
   }
 
-  running = 0;
-
   int ret = rpc::RpcServerEnable(RpcServer);
   if (ret) panic("couldn't enable RPC server");
-
-  //sbw_register_delay_source(0, get_mutex_delay);
-  //sbw_register_delay_source(1, get_mutex_delay);
-
-  // waits forever.
-  rt::WaitGroup(1).Wait();
-}
-
-void LoadBalancer(struct srpc_ctx *ctx) {
-  // Validate and parse the request
-  if (unlikely(ctx->req_len != sizeof(payload))) {
-    log_err("got invalid RPC len %ld", ctx->req_len);
-    return;
-  }
-  const payload *in = reinterpret_cast<const payload *>(ctx->req_buf);
-
-  LBCTX<payload> *resp_ctx = load_balancer[0]->Send(
-			(void *)ctx->req_buf, sizeof(payload), in->hash);
-  resp_ctx->Wait();
-
-  // Craft a response
-  ctx->resp_len = sizeof(payload);
-  ctx->ds_credit = load_balancer[0]->Credit();
-  ctx->drop = resp_ctx->IsDropped();
-
-  payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
-  memcpy(out, in, sizeof(*out));
-
-  out->tsc_end = hton64(rdtscp(&out->cpu));
-  out->cpu = hton32(out->cpu);
-  out->server_queue = hton64(rt::RuntimeQueueUS());
-
-  delete resp_ctx;
-}
-
-void LBLocalDropHandler(struct crpc_ctx *c) {
-  LBCTX<payload> *ctx =
-	  rpc::LoadBalancer<payload, PAYLOAD_ID_OFF>::GetCTX(c->buf);
-
-  memcpy(&ctx->resp, c->buf, c->len);
-  ctx->dropped = true;
-  ctx->Done();
-}
-
-void LBRemoteDropHandler(void *buf, size_t len, void *arg) {
-  assert(len == sizeof(payload));
-  LBCTX<payload> *ctx =
-	  rpc::LoadBalancer<payload, PAYLOAD_ID_OFF>::GetCTX((char *)buf);
-
-  ctx->dropped = true;
-  ctx->Done();
-}
-
-void LBHandler(void *arg) {
-  rt::Thread([] { RPCSStatServer(); }).Detach();
-
-  load_balancer[0] = new rpc::LoadBalancer<payload, PAYLOAD_ID_OFF>(raddr,
-			num_servers, kNumDupClient, nconn[0], LBLocalDropHandler,
-			LBRemoteDropHandler);
-
-  /* Start Server */
-  int ret = rpc::RpcServerEnable(LoadBalancer);
-  if (ret) panic("couldn't start LB server");
-  // waits forever.
-  rt::WaitGroup(1).Wait();
-}
-
-void FanOut(struct srpc_ctx *ctx) {
-  // Validate and parse the request
-  if (unlikely(ctx->req_len != sizeof(payload))) {
-    log_err("got invalid RPC len %ld", ctx->req_len);
-    return;
-  }
-  const payload *in = reinterpret_cast<const payload *>(ctx->req_buf);
-
-  FOCTX<payload> *resp_ctx = fan_outer->Send(
-			(void *)ctx->req_buf, sizeof(payload), in->hash);
-
-  resp_ctx->Wait();
-
-  // Craft a response
-  ctx->resp_len = sizeof(payload);
-  ctx->ds_credit = fan_outer->Credit();
-  ctx->drop = resp_ctx->IsDropped();
-
-  payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
-  memcpy(out, in, sizeof(*out));
-
-  out->tsc_end = hton64(rdtscp(&out->cpu));
-  out->cpu = hton32(out->cpu);
-  out->server_queue = hton64(rt::RuntimeQueueUS());
-
-  delete resp_ctx;
-}
-
-void FOLocalDropHandler(struct crpc_ctx *c) {
-  FOCTX<payload> *ctx = rpc::FanOuter<payload, PAYLOAD_ID_OFF>::GetCTX(c->buf);
-  int idx = ctx->num_resp++;
-
-  memcpy(&ctx->resp[idx], c->buf, c->len);
-  ctx->dropped[idx] = true;
-  ctx->Done();
-}
-
-void FORemoteDropHandler(void *buf, size_t len, void *arg) {
-  assert(len == sizeof(payload));
-  FOCTX<payload> *ctx =
-	  rpc::FanOuter<payload, PAYLOAD_ID_OFF>::GetCTX((char *)buf);
-  int idx = ctx->num_resp++;
-
-  ctx->dropped[idx] = true;
-  ctx->Done();
-}
-
-void FOHandler(void *arg) {
-  rt::Thread([] { RPCSStatServer(); }).Detach();
-
-  fan_outer = new rpc::FanOuter<payload, PAYLOAD_ID_OFF>(raddr,
-			num_servers, kNumDupClient, nconn[0],
-			FOLocalDropHandler, FORemoteDropHandler);
-
-  /* Start server */
-  int ret = rpc::RpcServerEnable(FanOut);
-  if (ret) panic("couldn't start FO server");
-  // waits forever.
-  rt::WaitGroup(1).Wait();
-}
-
-void Sequential(struct srpc_ctx *ctx) {
-  uint64_t ds_credit;
-  bool success = true;
-  // Validate and parse the request
-  if (unlikely(ctx->req_len != sizeof(payload))) {
-    log_err("got invalid RPC len %ld", ctx->req_len);
-    return;
-  }
-  const payload *in = reinterpret_cast<const payload *>(ctx->req_buf);
-
-  LBCTX<payload> *resp_ctx;
-  for(int i = 0; i < num_servers; ++i) {
-    resp_ctx = load_balancer[i]->Send(
-			(void *)ctx->req_buf, sizeof(payload), in->hash);
-    resp_ctx->Wait();
-
-    if (resp_ctx->IsDropped()) {
-      success = false;
-      break;
-    }
-  }
-
-  ds_credit = load_balancer[0]->Credit();
-  for (int i = 1; i < num_servers; ++i) {
-    ds_credit = MIN(ds_credit, load_balancer[i]->Credit());
-  }
-
-  // Craft a response
-  ctx->resp_len = sizeof(payload);
-  ctx->ds_credit = ds_credit;
-  ctx->drop = !success;
-
-  payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
-  memcpy(out, in, sizeof(*out));
-
-  out->tsc_end = hton64(rdtscp(&out->cpu));
-  out->cpu = hton32(out->cpu);
-  out->server_queue = hton64(rt::RuntimeQueueUS());
-
-  delete resp_ctx;
-}
-
-
-void SEQHandler(void *arg) {
-  rt::Thread([] { RPCSStatServer(); }).Detach();
-
-  for(int i = 0; i < num_servers; ++i) {
-    load_balancer[i] = new rpc::LoadBalancer<payload, PAYLOAD_ID_OFF>(
-			raddr + i, 1, kNumDupClient, nconn[i],
-			LBLocalDropHandler, LBRemoteDropHandler);
-  }
-
-  /* Start server */
-  int ret = rpc::RpcServerEnable(Sequential);
-  if (ret) panic("couldn't start FO server");
   // waits forever.
   rt::WaitGroup(1).Wait();
 }
 
 template <class Arrival, class Service>
 std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
-                                    double last_us, bool is_monster) {
+                                    double last_us) {
   std::vector<work_unit> w;
   double st_us;
   while (true) {
-/*
-    if (cur_us < 3000000)
+    if (cur_us < 4000000)
       cur_us += a();
+    else if (cur_us < 6000000)
+      cur_us += a() / 2.0;
     else
-      cur_us += a() / 5.0;
-*/
-    cur_us += a();
+      cur_us += a();
     if (cur_us > last_us) break;
     switch (st_type) {
       case 1: // exponential
@@ -745,7 +517,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
       default:
 	panic("unknown service time distribution");
     }
-    w.emplace_back(work_unit{cur_us, st_us, 0, rand(), false, is_monster});
+    w.emplace_back(work_unit{cur_us, st_us, 0, rand()});
   }
 
   return w;
@@ -755,33 +527,39 @@ std::vector<work_unit> ClientWorker(
     rpc::RpcClient *c, rt::WaitGroup *starter, rt::WaitGroup *starter2,
     std::function<std::vector<work_unit>()> wf) {
   std::vector<work_unit> w(wf());
-
-  std::vector<rt::Thread> ths;
+  std::vector<uint64_t> timings;
+  timings.reserve(w.size());
 
   // Start the receiver thread.
-  for(int i = 0; i < c->NumConns(); ++i) {
-    ths.emplace_back(rt::Thread([&, i] {
-      payload rp;
+  auto th = rt::Thread([&] {
+    payload rp;
+    uint64_t latency;
 
-      while (true) {
-        ssize_t ret = c->Recv(&rp, sizeof(rp), i, (void *)w.data());
-        if (ret != static_cast<ssize_t>(sizeof(rp))) {
-          if (ret == 0 || ret < 0) break;
-          panic("read failed, ret = %ld", ret);
-        }
-
-        uint64_t idx = ntoh64(rp.index);
-
-        w[idx].duration_us = microtime() - w[idx].timing;
-	w[idx].success = true;
-        w[idx].credit = c->Credit();
-        w[idx].tsc = ntoh64(rp.tsc_end);
-        w[idx].cpu = ntoh32(rp.cpu);
-        w[idx].server_queue = ntoh64(rp.server_queue);
-        w[idx].server_time = w[idx].work_us + w[idx].server_queue;
+    while (true) {
+      ssize_t ret = c->Recv(&rp, sizeof(rp), &latency);
+      if (ret != static_cast<ssize_t>(sizeof(rp))) {
+        if (ret == 0 || ret < 0) break;
+	panic("read failed, ret = %ld", ret);
       }
-    }));
-  }
+
+      uint64_t now = microtime();
+      uint64_t idx = ntoh64(rp.index);
+
+      if (!rp.success) {
+        w[idx].duration_us = latency;
+        w[idx].success = false;
+	      continue;
+      }
+
+      w[idx].duration_us = now - timings[idx];
+      w[idx].window = c->WinAvail();
+      w[idx].tsc = ntoh64(rp.tsc_end);
+      w[idx].cpu = ntoh32(rp.cpu);
+      w[idx].server_queue = ntoh64(rp.server_queue);
+      w[idx].server_time = w[idx].work_us + w[idx].server_queue;
+      w[idx].success = true;
+    }
+  });
 
   // Synchronized start of load generation.
   starter->Done();
@@ -810,13 +588,13 @@ std::vector<work_unit> ClientWorker(
         kMaxCatchUpUS)
       continue;
 
-    w[i].timing = microtime();
+    timings[i] = microtime();
 
     // Send an RPC request.
+    p.success = false;
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
-    p.hash = hton64(w[i].hash);
-    ssize_t ret = c->Send(&p, sizeof(p), w[i].hash, (void *)w.data());
+    ssize_t ret = c->Send(&p, sizeof(p), w[i].hash);
     if (ret == -ENOBUFS) continue;
     if (ret != static_cast<ssize_t>(sizeof(p)))
       panic("write failed, ret = %ld", ret);
@@ -824,71 +602,24 @@ std::vector<work_unit> ClientWorker(
 
   // rt::Sleep(1 * rt::kSeconds);
   rt::Sleep((int)(kRTT + 2 * st));
-  //c->Abort();
   BUG_ON(c->Shutdown(SHUT_RDWR));
-
-  for (auto &th : ths)
-    th.Join();
+  th.Join();
 
   return w;
 }
 
-void ClientLocalDropHandler(struct crpc_ctx *c) {
-  payload *req = reinterpret_cast<payload *>(c->buf);
-  uint64_t idx = ntoh64(req->index);
-  work_unit *w = reinterpret_cast<work_unit *>(c->arg);
-
-  w[idx].duration_us = 0;
-  w[idx].success = false;
-}
-
-void ClientRemoteDropHandler(void *buf, size_t len, void *arg) {
-  assert(len == sizeof(payload));
-  payload *req = (payload *)buf;
-  uint64_t idx = ntoh64(req->index);
-  work_unit *w = reinterpret_cast<work_unit *>(arg);
-
-  w[idx].duration_us = microtime() - w[idx].timing;
-  w[idx].success = false;
-}
-
 std::vector<work_unit> RunExperiment(
     int threads, struct cstat_raw *csr, struct sstat *ss, double *elapsed,
-    std::function<std::vector<work_unit>()> wf,
-    std::function<std::vector<work_unit>()> wf2) {
+    std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
-  std::vector<std::unique_ptr<rpc::RpcClient>> clients;
+  std::vector<std::unique_ptr<rpc::RpcClient>> conns;
   sstat_raw s1, s2;
   shstat_raw sh1, sh2;
 
-  int server_idx;
-  int conn_idx;
-
   for (int i = 0; i < threads; ++i) {
-    //struct rpc_session_info info = {.session_type = (i % 10 < 1 ? 1 : 0)};
-    struct rpc_session_info info = {.session_type = 0};
-    std::unique_ptr<rpc::RpcClient> outc(rpc::RpcClient::Dial(raddr[0], i + 1,
-					ClientLocalDropHandler,
-					ClientRemoteDropHandler,
-					&info));
+    std::unique_ptr<rpc::RpcClient> outc(rpc::RpcClient::Dial(raddr, i + 1));
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
-
-    if (nconn[0] > 1) {
-      server_idx = 0;
-      conn_idx = 1;
-    } else {
-      server_idx = 1;
-      conn_idx = 0;
-    }
-
-    while (server_idx < num_servers) {
-      outc->AddConnection(raddr[server_idx]);
-      if (++conn_idx >= nconn[server_idx]) {
-        server_idx++;
-	conn_idx = 0;
-      }
-    }
-    clients.emplace_back(std::move(outc));
+    conns.emplace_back(std::move(outc));
   }
 
   // Launch a worker thread for each connection.
@@ -897,16 +628,9 @@ std::vector<work_unit> RunExperiment(
 
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
-
-  th.emplace_back(rt::Thread([&] {
-    auto v = ClientWorker(clients[0].get(), &starter, &starter2, wf2);
-    samples[0].reset(new std::vector<work_unit>(std::move(v)));
-  }));
-
-  for (int i = 1; i < threads; ++i) {
+  for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      srand(time(NULL) * (i+1));
-      auto v = ClientWorker(clients[i].get(), &starter, &starter2, wf);
+      auto v = ClientWorker(conns[i].get(), &starter, &starter2, wf);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
@@ -929,20 +653,8 @@ std::vector<work_unit> RunExperiment(
   auto start = steady_clock::now();
   barrier();
 
-  // Clear the stat after warmup time
-  rt::Sleep(kWarmUpTime);
-  if (!b || b->IsLeader()) {
-    s1 = ReadRPCSStat();
-    sh1 = ReadShenangoStat();
-  }
-  for (auto &c : clients) {
-    c->StatClear();
-  }
-
   // Wait for the workers to finish.
-  for (auto &t : th) {
-    t.Join();
-  }
+  for (auto &t : th) t.Join();
 
   // |--- end experiment duration timing ---|
   barrier();
@@ -955,19 +667,20 @@ std::vector<work_unit> RunExperiment(
   }
 
   // Force the connections to close.
-  for (auto &c : clients) c->Abort();
+  for (auto &c : conns) c->Abort();
 
   double elapsed_ = duration_cast<sec>(finish - start).count();
   elapsed_ -= kWarmUpTime;
 
   // Aggregate client stats
   if (csr) {
-    for (auto &c : clients) {
-      csr->ecredit_rx += c->StatEcreditRx();
-      csr->cupdate_tx += c->StatCupdateTx();
+    for (auto &c : conns) {
+      csr->winu_rx += c->StatWinuRx();
+      csr->winu_tx += c->StatWinuTx();
       csr->resp_rx += c->StatRespRx();
       csr->req_tx += c->StatReqTx();
-      csr->credit_expired += c->StatCreditExpired();
+      csr->win_expired += c->StatWinExpired();
+      // csr->req_dropped += c->StatReqDropped();
       c->Close();
     }
   }
@@ -977,11 +690,10 @@ std::vector<work_unit> RunExperiment(
   double min_throughput = 0.0;
   double max_throughput = 0.0;
   uint64_t good_resps = 0;
-  uint64_t resps = 0;
   uint64_t offered = 0;
-  uint64_t client_drop = 0;
 
   // ERIC
+  uint64_t client_drop = 0;
   std::vector<work_unit> client_drop_tasks;
   // END ERIC
 
@@ -989,39 +701,32 @@ std::vector<work_unit> RunExperiment(
     auto &v = *samples[i];
     double throughput;
     int slo_success;
-    int resp_success;
 
+    offered += v.size();
     // Remove requests arrived during warm-up periods
     v.erase(std::remove_if(v.begin(), v.end(),
                         [](const work_unit &s) {
                           return ((s.start_us + s.duration_us) < kWarmUpTime);
-                        }),
-            v.end());
-
-    offered += v.size();
+                        }), v.end());
+    // ERIC
     client_drop += std::count_if(v.begin(), v.end(), [](const work_unit &s) {
       return (s.duration_us == 0);
     });
-    // ERIC
     std::copy_if(v.begin(), v.end(), std::back_inserter(client_drop_tasks), [](const work_unit &s) {
                           return (s.duration_us == 0);
                         });
     // END ERIC
-    // Remove local drops
+    // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
-                        [](const work_unit &s) {
-                          return (s.duration_us == 0);
-                        }),
+                           [](const work_unit &s) {
+                             return (s.duration_us == 0);
+                           }),
             v.end());
-    resp_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
-      return s.success;
-    });
     slo_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
-      return s.success && s.duration_us < slo;
+      return s.duration_us < slo;
     });
-    throughput = static_cast<double>(resp_success) / elapsed_ * 1000000;
+    throughput = static_cast<double>(v.size()) / elapsed_ * 1000000;
 
-    resps += resp_success;
     good_resps += slo_success;
     if (i == 0) {
       min_throughput = throughput;
@@ -1051,11 +756,13 @@ std::vector<work_unit> RunExperiment(
   // Report results.
   if (csr) {
     csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
-    csr->rps = static_cast<double>(resps) / elapsed_ * 1000000;
+    csr->offered_rps *=
+        static_cast<double>(kExperimentTime - kWarmUpTime) / kExperimentTime;
+    csr->rps = static_cast<double>(w.size()) / elapsed_ * 1000000;
     csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
-    csr->req_dropped = client_drop;
     csr->min_percli_tput = min_throughput;
     csr->max_percli_tput = max_throughput;
+    csr->req_dropped = client_drop;
   }
 
   if ((!b || b->IsLeader()) && ss) {
@@ -1068,15 +775,15 @@ std::vector<work_unit> RunExperiment(
         (ss->cpu_usage - 1 / static_cast<double>(s1.max_cores)) /
         (static_cast<double>(s1.num_cores) / static_cast<double>(s1.max_cores));
 
-    uint64_t cupdate_rx_pkts = s2.cupdate_rx - s1.cupdate_rx;
-    uint64_t ecredit_tx_pkts = s2.ecredit_tx - s1.ecredit_tx;
-    uint64_t credit_tx = s2.credit_tx - s1.credit_tx;
+    uint64_t winu_rx_pkts = s2.winu_rx - s1.winu_rx;
+    uint64_t winu_tx_pkts = s2.winu_tx - s1.winu_tx;
+    uint64_t win_tx_wins = s2.win_tx - s1.win_tx;
     uint64_t req_rx_pkts = s2.req_rx - s1.req_rx;
     uint64_t req_drop_pkts = s2.req_dropped - s1.req_dropped;
     uint64_t resp_tx_pkts = s2.resp_tx - s1.resp_tx;
-    ss->cupdate_rx_pps = static_cast<double>(cupdate_rx_pkts) / elapsed_ * 1000000;
-    ss->ecredit_tx_pps = static_cast<double>(ecredit_tx_pkts) / elapsed_ * 1000000;
-    ss->credit_tx_cps = static_cast<double>(credit_tx) / elapsed_ * 1000000;
+    ss->winu_rx_pps = static_cast<double>(winu_rx_pkts) / elapsed_ * 1000000;
+    ss->winu_tx_pps = static_cast<double>(winu_tx_pkts) / elapsed_ * 1000000;
+    ss->win_tx_wps = static_cast<double>(win_tx_wins) / elapsed_ * 1000000;
     ss->req_rx_pps = static_cast<double>(req_rx_pkts) / elapsed_ * 1000000;
     ss->req_drop_rate =
         static_cast<double>(req_drop_pkts) / static_cast<double>(req_rx_pkts);
@@ -1115,13 +822,9 @@ void PrintHeader(std::ostream &os) {
      << "p999,"
      << "p9999,"
      << "max,"
-     << "reject_min"
-     << "reject_mean"
-     << "reject_p50"
-     << "reject_p99"
-     << "p1_credit,"
-     << "mean_credit,"
-     << "p99_credit,"
+     << "p1_win,"
+     << "mean_win,"
+     << "p99_win,"
      << "p1_q,"
      << "mean_q,"
      << "p99_q,"
@@ -1133,19 +836,19 @@ void PrintHeader(std::ostream &os) {
      << "server:tx_bps,"
      << "server:rx_drops_pps,"
      << "server:rx_ooo_pps,"
-     << "server:cupdate_rx_pps,"
-     << "server:ecredit_tx_pps,"
-     << "server:credit_tx_cps,"
+     << "server:winu_rx_pps,"
+     << "server:winu_tx_pps,"
+     << "server:win_tx_wps,"
      << "server:req_rx_pps,"
      << "server:req_drop_rate,"
      << "server:resp_tx_pps,"
      << "client:min_tput,"
      << "client:max_tput,"
-     << "client:ecredit_rx_pps,"
-     << "client:cupdate_tx_pps,"
+     << "client:winu_rx_pps,"
+     << "client:winu_tx_pps,"
      << "client:resp_rx_pps,"
      << "client:req_tx_pps,"
-     << "client:credit_expired_cps,"
+     << "client:win_expired_wps,"
      << "client:req_dropped_rps" << std::endl;
 }
 
@@ -1157,7 +860,64 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
               << "-" << std::endl;
     return;
   }
+/*
+  double cur_us = 2000000;
+  double gran_us = 20000;
+  int good_resp_cnt = 0;
+  uint64_t reject_sum_ = 0;
+  uint64_t reject_cnt_ = 0;
+  std::vector<double> durations;
 
+  // sort!
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return (s1.start_us + s1.duration_us) < (s2.start_us + s2.duration_us);
+  });
+
+  for(const work_unit &s: w) {
+    double arr_us = s.start_us + s.duration_us;
+
+    if (arr_us < cur_us) continue;
+    if (arr_us >= cur_us + gran_us) {
+      cur_us += gran_us;
+
+      int duration_cnt = durations.size();
+      double time_s = cur_us / 1000000.0 - 2.0;
+      double goodput = 0.0;
+      double p99 = 0.0;
+      double reject_mean = 0.0;
+
+      if (duration_cnt > 0) {
+        std::sort(durations.begin(), durations.end(), [](const double &d1, const double &d2) {
+          return d1 < d2;
+        });
+	goodput = good_resp_cnt * (1000000 / gran_us);
+	p99 = durations[(duration_cnt - 1) * 0.99];
+      }
+
+      if (reject_cnt_ > 0) {
+        reject_mean = static_cast<double>(reject_sum_) / reject_cnt_;
+      }
+
+      printf("%lf,%lf,%lf\n", time_s, goodput,p99, reject_mean);
+
+      durations.clear();
+      good_resp_cnt = 0;
+      reject_sum_ = 0;
+      reject_cnt_ = 0;
+    }
+
+    if (!s.success) {
+      reject_cnt_++;
+      reject_sum_ += s.duration_us;
+      continue;
+    }
+
+    durations.push_back(s.duration_us);
+    if (s.duration_us <= slo) {
+      good_resp_cnt++;
+    }
+  }
+*/
   std::vector<work_unit> rejected;
 
   std::copy_if(w.begin(), w.end(), std::back_inserter(rejected), [](work_unit &s) {
@@ -1261,14 +1021,14 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   double max = w[w.size() - 1].duration_us;
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
-    return s1.credit < s2.credit;
+    return s1.window < s2.window;
   });
-  double sum_credit = std::accumulate(
+  double sum_win = std::accumulate(
       w.begin(), w.end(), 0.0,
-      [](double s, const work_unit &c) { return s + c.credit; });
-  double mean_credit = sum_credit / w.size();
-  double p1_credit = w[count * 0.01].credit;
-  double p99_credit = w[count * 0.99].credit;
+      [](double s, const work_unit &c) { return s + c.window; });
+  double mean_win = sum_win / w.size();
+  double p1_win = w[count * 0.01].window;
+  double p99_win = w[count * 0.99].window;
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.server_queue < s2.server_queue;
@@ -1291,45 +1051,40 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 
   std::cout << std::setprecision(4) << std::fixed << threads * total_agents << ","
 	    << cs->offered_rps << "," << cs->rps << "," << cs->goodput << ","
-	    << ss->cpu_usage << ","
-	    << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
-	    << p999 << "," << p9999 << "," << max << ","
-	    << reject_min << "," << reject_mean << "," << reject_p50 << ","
-	    << reject_p99 << ","
-	    << p1_credit << "," << mean_credit << "," << p99_credit << ","
-	    << p1_que << ","
+	    << ss->cpu_usage << "," << min << "," << mean << "," << p50 << ","
+	    << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
+	    << max << "," << reject_min << ","
+	    << reject_mean << "," << reject_p50 << ","
+	    << reject_p99 << "," << p1_win << ","
+	    << mean_win << "," << p99_win << "," << p1_que << ","
 	    << mean_que << "," << p99_que << "," << mean_stime << ","
 	    << p99_stime << "," << ss->rx_pps << "," << ss->tx_pps << ","
 	    << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
-	    << ss->rx_ooo_pps << "," << ss->cupdate_rx_pps << ","
-	    << ss->ecredit_tx_pps << "," << ss->credit_tx_cps << ","
+	    << ss->rx_ooo_pps << "," << ss->winu_rx_pps << ","
+	    << ss->winu_tx_pps << "," << ss->win_tx_wps << ","
 	    << ss->req_rx_pps << "," << ss->req_drop_rate << ","
-	    << ss->resp_tx_pps << ","
-	    << cs->min_percli_tput << "," << cs->max_percli_tput << ","
-	    << cs->ecredit_rx_pps << "," << cs->cupdate_tx_pps << ","
+	    << ss->resp_tx_pps << "," << cs->min_percli_tput << ","
+	    << cs->max_percli_tput << "," << cs->winu_rx_pps << ","
 	    << cs->resp_rx_pps << "," << cs->req_tx_pps << ","
-	    << cs->credit_expired_cps << "," << cs->req_dropped_rps << std::endl;
+	    << cs->win_expired_wps << "," << cs->req_dropped_rps << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
           << cs->offered_rps << "," << cs->rps << "," << cs->goodput << ","
-          << ss->cpu_usage << ","
-	  << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
-	  << p999 << "," << p9999 << "," << max << ","
-	  << reject_min << "," << reject_mean << "," << reject_p50 << ","
-	  << reject_p99 << ","
-	  << p1_credit << "," << mean_credit << "," << p99_credit << ","
-	  << p1_que << ","
+          << ss->cpu_usage << "," << min << "," << mean << "," << p50 << ","
+          << p90 << "," << p99 << "," << p999 << "," << p9999 << "," << max << ","
+	  << reject_min << "," << reject_mean << ","
+	  << reject_p50 << "," << reject_p99 << ","
+	  << p1_win << "," << mean_win << "," << p99_win << "," << p1_que << ","
 	  << mean_que << "," << p99_que << "," << mean_stime << ","
 	  << p99_stime << "," << ss->rx_pps << "," << ss->tx_pps << ","
 	  << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
-	  << ss->rx_ooo_pps << "," << ss->cupdate_rx_pps << ","
-	  << ss->ecredit_tx_pps << "," << ss->credit_tx_cps << ","
+	  << ss->rx_ooo_pps << "," << ss->winu_rx_pps << ","
+	  << ss->winu_tx_pps << "," << ss->win_tx_wps << ","
 	  << ss->req_rx_pps << "," << ss->req_drop_rate << ","
-	  << ss->resp_tx_pps << ","
-	  << cs->min_percli_tput << "," << cs->max_percli_tput << ","
-	  << cs->ecredit_rx_pps << "," << cs->cupdate_tx_pps << ","
+	  << ss->resp_tx_pps << "," << cs->min_percli_tput << ","
+	  << cs->max_percli_tput << "," << cs->winu_rx_pps << ","
 	  << cs->resp_rx_pps << "," << cs->req_tx_pps << ","
-	  << cs->credit_expired_cps << "," << cs->req_dropped_rps
+	  << cs->win_expired_wps << "," << cs->req_dropped_rps
 	  << std::endl << std::flush;
 
   json_out << "{"
@@ -1346,13 +1101,13 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
            << "\"p999\":" << p999 << ","
            << "\"p9999\":" << p9999 << ","
            << "\"max\":" << max << ","
-	   << "\"reject_min\":" << reject_min << ","
-	   << "\"reject_mean\":" << reject_mean << ","
-	   << "\"reject_p50\":" << reject_p50 << ","
-	   << "\"reject_p99\":" << reject_p99 << ","
-           << "\"p1_credit\":" << p1_credit << ","
-           << "\"mean_credit\":" << mean_credit << ","
-           << "\"p99_credit\":" << p99_credit << ","
+	   << "\"rej_min_del\":" << reject_min << ","
+	   << "\"rej_mean_del\":" << reject_mean << ","
+	   << "\"rej_p50_del\":" << reject_p50 << ","
+	   << "\"rej_p99_del\":" << reject_p99 << ","
+           << "\"p1_win\":" << p1_win << ","
+           << "\"mean_win\":" << mean_win << ","
+           << "\"p99_win\":" << p99_win << ","
            << "\"p1_q\":" << p1_que << ","
            << "\"mean_q\":" << mean_que << ","
            << "\"p99_q\":" << p99_que << ","
@@ -1364,19 +1119,19 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
            << "\"server:tx_bps\":" << ss->tx_bps << ","
            << "\"server:rx_drops_pps\":" << ss->rx_drops_pps << ","
            << "\"server:rx_ooo_pps\":" << ss->rx_ooo_pps << ","
-           << "\"server:cupdate_rx_pps\":" << ss->cupdate_rx_pps << ","
-           << "\"server:ecredit_tx_pps\":" << ss->ecredit_tx_pps << ","
-           << "\"server:credit_tx_cps\":" << ss->credit_tx_cps << ","
+           << "\"server:winu_rx_pps\":" << ss->winu_rx_pps << ","
+           << "\"server:winu_tx_pps\":" << ss->winu_tx_pps << ","
+           << "\"server:win_tx_wps\":" << ss->win_tx_wps << ","
            << "\"server:req_rx_pps\":" << ss->req_rx_pps << ","
            << "\"server:req_drop_rate\":" << ss->req_drop_rate << ","
            << "\"server:resp_tx_pps\":" << ss->resp_tx_pps << ","
            << "\"client:min_tput\":" << cs->min_percli_tput << ","
            << "\"client:max_tput\":" << cs->max_percli_tput << ","
-           << "\"client:ecredit_rx_pps\":" << cs->ecredit_rx_pps << ","
-           << "\"client:cupdate_tx_pps\":" << cs->cupdate_tx_pps << ","
+           << "\"client:winu_rx_pps\":" << cs->winu_rx_pps << ","
+           << "\"client:winu_tx_pps\":" << cs->winu_tx_pps << ","
            << "\"client:resp_rx_pps\":" << cs->resp_rx_pps << ","
            << "\"client:req_tx_pps\":" << cs->req_tx_pps << ","
-           << "\"client:credit_expired_cps\":" << cs->credit_expired_cps << ","
+           << "\"client:win_expired_wps\":" << cs->win_expired_wps << ","
            << "\"client:req_dropped_rps\":" << cs->req_dropped_rps << "},"
            << std::endl
            << std::flush;
@@ -1399,16 +1154,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
     return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0,
-                        kExperimentTime, false);
-  },
-  [=] {
-    std::mt19937 rg(rand());
-    std::mt19937 dg(rand());
-    std::exponential_distribution<double> rd(
-        1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
-    std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0,
-                        kExperimentTime, true);
+                        kExperimentTime);
   });
 
   if (b) {
@@ -1420,12 +1166,13 @@ void SteadyStateExperiment(int threads, double offered_rps,
              csr.goodput,
              csr.min_percli_tput,
              csr.max_percli_tput,
-             static_cast<double>(csr.ecredit_rx) / elapsed * 1000000,
-             static_cast<double>(csr.cupdate_tx) / elapsed * 1000000,
+             static_cast<double>(csr.winu_rx) / elapsed * 1000000,
+             static_cast<double>(csr.winu_tx) / elapsed * 1000000,
              static_cast<double>(csr.resp_rx) / elapsed * 1000000,
              static_cast<double>(csr.req_tx) / elapsed * 1000000,
-             static_cast<double>(csr.credit_expired) / elapsed * 1000000,
+             static_cast<double>(csr.win_expired) / elapsed * 1000000,
              static_cast<double>(csr.req_dropped) / elapsed * 1000000};
+
   // Print the results.
   PrintStatResults(w, &cs, &ss);
 }
@@ -1486,52 +1233,8 @@ void ClientHandler(void *arg) {
 
 }  // anonymous namespace
 
-void print_lb_usage() {
-  std::cerr << "usage: [alg] [cfg_file] lb [server_ip #1] [nconn #1]\n"
-	    << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
-	    << "\tcfg_file: Shenango configuration file\n"
-	    << "\tserver_ip: server IP address\n"
-	    << "\tnconn: the number of parallel connection to the server"
-	    << std:: endl;
-}
-
-void print_fo_usage() {
-  std::cerr << "usage: [alg] [cfg_file] fo [server_ip #1] [nconn #1]\n"
-	    << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
-	    << "\tcfg_file: Shenango configuration file\n"
-	    << "\tserver_ip: server IP address\n"
-	    << "\tnconn: the number of parallel connection to the server"
-	    << std:: endl;
-}
-
-void print_seq_usage() {
-  std::cerr << "usage: [alg] [cfg_file] seq [server_ip #1] [nconn #1]\n"
-	    << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
-	    << "\tcfg_file: Shenango configuration file\n"
-	    << "\tserver_ip: server IP address\n"
-	    << "\tnconn: the number of parallel connection to the server"
-	    << std:: endl;
-}
-
-void print_client_usage() {
-  std::cerr << "usage: [alg] [cfg_file] client [nclients] "
-      << "[service_us] [service_dist] [slo] [nagents] "
-      << "[offered_load] [server_ip #1] [nconn #1] ...\n"
-      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
-      << "\tcfg_file: Shenango configuration file\n"
-      << "\tnclients: the number of client connections\n"
-      << "\tservice_us: average request processing time (in us)\n"
-      << "\tservice_dist: request processing time distribution (exp/const/bimod)\n"
-      << "\tslo: RPC service level objective (in us)\n"
-      << "\tnagents: the number of agents\n"
-      << "\toffered_load: load geneated by client and agents in requests per second\n"
-      << "\tserver_ip: server IP address\n"
-      << "\tnconn: the number of parallel connection to the server"
-      << std::endl;
-}
-
 int main(int argc, char *argv[]) {
-  int ret, i;
+  int ret;
 
   if (argc < 4) {
     std::cerr << "usage: [alg] [cfg_file] [cmd] ...\n"
@@ -1541,18 +1244,10 @@ int main(int argc, char *argv[]) {
     return -EINVAL;
   }
 
-  for (int i = 0; i < BOTTLENECK_N; ++i) {
-    mutex_init(&shared_mutex[i]);
-    spin_lock_init(&shared_spin[i]);
-  }
-
   std::string olc = argv[1]; // overload control
   if (olc.compare("breakwater") == 0) {
     crpc_ops = &cbw_ops;
     srpc_ops = &sbw_ops;
-  } else if (olc.compare("protego") == 0) {
-    crpc_ops = &cbw_ops;
-    srpc_ops = &sbw2_ops;
   } else if (olc.compare("seda") == 0) {
     crpc_ops = &csd_ops;
     srpc_ops = &ssd_ops;
@@ -1573,115 +1268,23 @@ int main(int argc, char *argv[]) {
 
   std::string cmd = argv[3];
   if (cmd.compare("server") == 0) {
-    // Server
     ret = runtime_init(argv[2], ServerHandler, NULL);
     if (ret) {
       printf("failed to start runtime\n");
       return ret;
     }
   } else if (cmd.compare("agent") == 0) {
-    // Agent
     if (argc < 5 || StringToAddr(argv[4], &master.ip)) {
-      std::cerr << "usage: [alg] [cfg_file] agent [client_ip]\n"
-	        << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
-		<< "\tcfg_file: Shenango configuration file\n"
-		<< "\tclient_ip: Client IP address" << std::endl;
+    std::cerr << "usage: [alg] [cfg_file] agent [client_ip]\n"
+	      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
+	      << "\tcfg_file: Shenango configuration file\n"
+	      << "\tclient_ip: Client IP address" << std::endl;
       return -EINVAL;
     }
 
     ret = runtime_init(argv[2], AgentHandler, NULL);
     if (ret) {
       printf("failed to start runtime\n");
-      return ret;
-    }
-  } else if (cmd.compare("lb") == 0) {
-    // Load-Balancer
-    if (argc < 6) {
-      print_lb_usage();
-      return -EINVAL;
-    }
-
-    num_servers = argc - 4;
-    if (num_servers % 2 != 0) {
-      print_lb_usage();
-      return -EINVAL;
-    }
-    num_servers /= 2;
-
-    for (i = 0; i < num_servers; ++i) {
-      ret = StringToAddr(argv[4+2*i], &raddr[i].ip);
-      if (ret) {
-        std::cerr << "[Error] Cannot parse server IP: " << argv[4+2*i]
-		  << std::endl;
-	return -EINVAL;
-      }
-      raddr[i].port = kNetbenchPort;
-      nconn[i] = std::stoi(argv[5+2*i], nullptr, 0);
-    }
-
-    ret = runtime_init(argv[2], LBHandler, NULL);
-    if (ret) {
-      std::cerr << "[Error] Failed to start runtime" << std::endl;
-      return ret;
-    }
-  } else if (cmd.compare("fo") == 0) {
-    // Load-Balancer
-    if (argc < 6) {
-      print_fo_usage();
-      return -EINVAL;
-    }
-
-    num_servers = argc - 4;
-    if (num_servers % 2 != 0) {
-      print_fo_usage();
-      return -EINVAL;
-    }
-    num_servers /= 2;
-
-    for (i = 0; i < num_servers; ++i) {
-      ret = StringToAddr(argv[4+2*i], &raddr[i].ip);
-      if (ret) {
-        std::cerr << "[Error] Cannot parse server IP: " << argv[4+2*i]
-		  << std::endl;
-	return -EINVAL;
-      }
-      raddr[i].port = kNetbenchPort;
-      nconn[i] = std::stoi(argv[5+2*i], nullptr, 0);
-    }
-
-    ret = runtime_init(argv[2], FOHandler, NULL);
-    if (ret) {
-      std::cerr << "[Error] Failed to start runtime" << std::endl;
-      return ret;
-    }
-  } else if (cmd.compare("seq") == 0) {
-    // Load-Balancer
-    if (argc < 6) {
-      print_seq_usage();
-      return -EINVAL;
-    }
-
-    num_servers = argc - 4;
-    if (num_servers % 2 != 0) {
-      print_seq_usage();
-      return -EINVAL;
-    }
-    num_servers /= 2;
-
-    for (i = 0; i < num_servers; ++i) {
-      ret = StringToAddr(argv[4+2*i], &raddr[i].ip);
-      if (ret) {
-        std::cerr << "[Error] Cannot parse server IP: " << argv[4+2*i]
-		  << std::endl;
-	return -EINVAL;
-      }
-      raddr[i].port = kNetbenchPort;
-      nconn[i] = std::stoi(argv[5+2*i], nullptr, 0);
-    }
-
-    ret = runtime_init(argv[2], SEQHandler, NULL);
-    if (ret) {
-      std::cerr << "[Error] Failed to start runtime" << std::endl;
       return ret;
     }
   } else if (cmd.compare("client") != 0) {
@@ -1694,14 +1297,31 @@ int main(int argc, char *argv[]) {
   }
 
   if (argc < 11) {
-    print_client_usage();
+    std::cerr << "usage: [alg] [cfg_file] client [nclients] "
+		 "[server_ip] [service_us] [service_dist] [slo] [nagents] "
+		 "[offered_load]\n"
+	      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
+	      << "\tcfg_file: Shenango configuration file\n"
+	      << "\tnclients: the number of client connections\n"
+	      << "\tserver_ip: server IP address\n"
+	      << "\tservice_us: average request processing time (in us)\n"
+	      << "\tservice_dist: request processing time distribution (exp/const/bimod)\n"
+	      << "\tslo: RPC service level objective (in us)\n"
+	      << "\tnagents: the number of agents\n"
+	      << "\toffered_load: load geneated by client and agents in requests per second"
+	      << std::endl;
     return -EINVAL;
   }
 
   threads = std::stoi(argv[4], nullptr, 0);
-  st = std::stod(argv[5], nullptr);
 
-  std::string st_dist = argv[6];
+  ret = StringToAddr(argv[5], &raddr.ip);
+  if (ret) return -EINVAL;
+  raddr.port = kNetbenchPort;
+
+  st = std::stod(argv[6], nullptr);
+
+  std::string st_dist = argv[7];
   if (st_dist.compare("exp") == 0) {
     st_type = 1;
   } else if (st_dist.compare("const") == 0) {
@@ -1710,52 +1330,24 @@ int main(int argc, char *argv[]) {
     st_type = 3;
   } else {
     std::cerr << "invalid service time distribution: " << st_dist << std::endl;
-    print_client_usage();
-    return -EINVAL;
-  }
-
-  slo = std::stoi(argv[7], nullptr, 0);
-  total_agents += std::stoi(argv[8], nullptr, 0);
-  offered_load = std::stod(argv[9], nullptr);
-
-  num_servers = argc - 10; // does this make any sense?
-  if (num_servers % 2 != 0) {
-    print_client_usage();
-    return -EINVAL;
-  }
-  num_servers /= 2;
-
-  if (num_servers > 16) {
-    std::cerr << "[Warning] the number of server exceeds 16."
+    std::cerr << "usage: [alg] [cfg_file] client [nclients] "
+		 "[server_ip] [service_us] [service_dist] [slo] [nagents] "
+		 "[offered_load]\n"
+	      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
+	      << "\tcfg_file: Shenango configuration file\n"
+	      << "\tnclients: the number of client connections\n"
+	      << "\tserver_ip: server IP address\n"
+	      << "\tservice_us: average request processing time (in us)\n"
+	      << "\tservice_dist: request processing time distribution (exp/const/bimod)\n"
+	      << "\tslo: RPC service level objective (in us)\n"
+	      << "\tnagents: the number of agents\n"
+	      << "\toffered_load: load generated by client and agents in requests per second"
 	      << std::endl;
-    num_servers = 16;
   }
 
-  if (num_servers != 1) {
-    std::cerr << "[Error] num_servers is not equal to 1. Unsure if what happens if it isn't equal to 1"
-              << std::endl;
-    return -EINVAL;
-  }
-
-  for(i = 0; i < num_servers; ++i) {
-    int nconn_;
-
-    ret = StringToAddr(argv[10+2*i], &raddr[i].ip);
-    if (ret) {
-      std::cerr << "[Error] Cannot parse server IP:" << argv[10+2*i]
-	        << std::endl;
-      return -EINVAL;
-    }
-    raddr[i].port = kNetbenchPort;
-
-    nconn_ = std::stoi(argv[11+2*i], nullptr, 0);
-    if (nconn_ > 16) {
-      std::cerr << "[Warning] the number of parallel connection exceeds 16."
-	        << std::endl;
-      nconn_ = 16;
-    }
-    nconn[i] = nconn_;
-  }
+  slo = std::stoi(argv[8], nullptr, 0);
+  total_agents += std::stoi(argv[9], nullptr, 0);
+  offered_load = std::stod(argv[10], nullptr);
 
   ret = runtime_init(argv[2], ClientHandler, NULL);
   if (ret) {
