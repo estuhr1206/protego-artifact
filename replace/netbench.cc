@@ -548,7 +548,7 @@ std::vector<work_unit> ClientWorker(
       if (!rp.success) {
         w[idx].duration_us = latency;
         w[idx].success = false;
-	continue;
+	      continue;
       }
 
       w[idx].duration_us = now - timings[idx];
@@ -680,7 +680,7 @@ std::vector<work_unit> RunExperiment(
       csr->resp_rx += c->StatRespRx();
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
-      csr->req_dropped += c->StatReqDropped();
+      // csr->req_dropped += c->StatReqDropped();
       c->Close();
     }
   }
@@ -703,6 +703,11 @@ std::vector<work_unit> RunExperiment(
     int slo_success;
 
     offered += v.size();
+    // Remove requests arrived during warm-up periods
+    v.erase(std::remove_if(v.begin(), v.end(),
+                        [](const work_unit &s) {
+                          return ((s.start_us + s.duration_us) < kWarmUpTime);
+                        }), v.end());
     // ERIC
     client_drop += std::count_if(v.begin(), v.end(), [](const work_unit &s) {
       return (s.duration_us == 0);
@@ -714,8 +719,7 @@ std::vector<work_unit> RunExperiment(
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const work_unit &s) {
-                             return (s.duration_us == 0 ||
-                                     (s.start_us + s.duration_us) < kWarmUpTime);
+                             return (s.duration_us == 0);
                            }),
             v.end());
     slo_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
@@ -758,6 +762,7 @@ std::vector<work_unit> RunExperiment(
     csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
     csr->max_percli_tput = max_throughput;
+    csr->req_dropped = client_drop;
   }
 
   if ((!b || b->IsLeader()) && ss) {

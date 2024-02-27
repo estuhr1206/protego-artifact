@@ -13,13 +13,18 @@ import random
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "breakwater"
+OVERLOAD_ALG = "nocontrol"
 
 # The number of client connections
 NUM_CONNS = 10
 
 # Average service time (in us)
 ST_AVG = 10
+
+# make sure these match in bw_config.h
+# Too lazy to do a sed command or similar right now TODO
+BW_TARGET = 80
+BW_THRESHOLD = 160
 
 # Service time distribution
 #    exp: exponential
@@ -32,7 +37,7 @@ ST_DIST = "exp"
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
-OFFERED_LOADS = [850000]
+OFFERED_LOADS = [1600000]
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
@@ -53,6 +58,8 @@ DOWNLOAD_RAW = True
 ENABLE_ANTAGONIST = False
 
 IAS_DEBUG = True
+
+ERIC_CSV_NAMING = False
 
 # number of threads for antagonist
 threads = 18
@@ -389,33 +396,41 @@ cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}@{}:~/{}/output.csv ./"\
 execute_local(cmd)
 
 output_prefix = "{}".format(OVERLOAD_ALG)
+eric_prefix = "{}".format(OVERLOAD_ALG)
+
+if OVERLOAD_ALG == "breakwater":
+    eric_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+    output_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+
+if NUM_CORES_LC_GUARANTEED > 0:
+    eric_prefix += "_guaranteed"
 
 if SPIN_SERVER:
     output_prefix += "_spin"
+    eric_prefix += "_spinning"
 
 if DISABLE_WATCHDOG:
     output_prefix += "_nowd"
 
 if ENABLE_ANTAGONIST:
     output_prefix += "_antagonist"
+    eric_prefix += "_antagonist"
+
 output_prefix += "_{:d}cores".format(NUM_CORES_SERVER)
 output_prefix += "_{:d}load".format(OFFERED_LOADS[0])
+# Assuming 16 cores consistently for now, so not adding cores to prefix
+eric_prefix += "_{:d}k".format(int(OFFERED_LOADS[0] / 1000))
 
 output_prefix += "_{}_{:d}_nconn_{:d}".format(ST_DIST, ST_AVG, NUM_CONNS)
 
-# Print Headers
-header = "num_clients,offered_load,throughput,goodput,cpu"\
-        ",min,mean,p50,p90,p99,p999,p9999,max"\
-        ",reject_min,reject_mean,reject_p50,reject_p99"\
-        ",p1_credit,mean_credit,p99_credit"\
-        ",p1_q,mean_q,p99_q,mean_stime,p99_stime,server:rx_pps,server:tx_pps"\
-        ",server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
-        ",server:cupdate_rx_pps,server:ecredit_tx_pps,server:credit_tx_cps"\
-        ",server:req_rx_pps,server:req_drop_rate,server:resp_tx_pps"\
-        ",client:min_tput,client:max_tput"\
-        ",client:ecredit_rx_pps,client:cupdate_tx_pps"\
-        ",client:resp_rx_pps,client:req_tx_pps"\
-        ",client:credit_expired_cps,client:req_dropped_rps"
+header = "num_clients,offered_load,throughput,goodput,cpu,min,mean,p50,p90,p99,p999,p9999"\
+        ",max,reject_min,reject_mean,reject_p50,reject_p99,p1_win,mean_win,p99_win,p1_q,mean_q,p99_q"\
+		",mean_stime,p99_stime,server:rx_pps"\
+        ",server:tx_pps,server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
+        ",server:winu_rx_pps,server:winu_tx_pps,server:win_tx_wps,server:req_rx_pps"\
+        ",server:req_drop_rate,server:resp_tx_pps,client:min_tput,client:max_tput"\
+        ",client:winu_rx_pps,client:resp_rx_pps,client:req_tx_pps"\
+        ",client:win_expired_wps,client:req_dropped_rps"
 
 curr_date = datetime.now().strftime("%m_%d_%Y")
 curr_time = datetime.now().strftime("%H-%M-%S")
@@ -432,6 +447,9 @@ execute_local(cmd)
 
 cmd = "cat output.csv >> {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix)
 execute_local(cmd)
+
+if ERIC_CSV_NAMING:
+    cmd = "mv {}/{}.csv {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix, run_dir, eric_prefix)
 
 if DOWNLOAD_RAW:
     print("Fetching raw output (all non rejected tasks)")
