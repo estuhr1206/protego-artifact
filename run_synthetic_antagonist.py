@@ -16,7 +16,7 @@ import random
 OVERLOAD_ALG = "nocontrol"
 
 # The number of client connections
-NUM_CONNS = 10
+NUM_CONNS = 1000
 
 # Average service time (in us)
 ST_AVG = 10
@@ -37,6 +37,9 @@ ST_DIST = "exp"
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
+# OFFERED_LOADS = [400000, 800000, 1000000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
+# loadshift = 1 for load shifts in netbench.cc
+LOADSHIFT = 0
 OFFERED_LOADS = [1600000]
 
 # for i in range(len(OFFERED_LOADS)):
@@ -53,11 +56,13 @@ NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
 
-DOWNLOAD_RAW = True
+LARGE_CLIENT_QUEUES = False
+
+DOWNLOAD_RAW = False
 
 ENABLE_ANTAGONIST = False
 
-IAS_DEBUG = True
+IAS_DEBUG = False
 
 ERIC_CSV_NAMING = False
 
@@ -229,6 +234,20 @@ for i in range(NUM_AGENT):
     generate_shenango_config(False, agent_conns[i], agent_ips[i], netmask,
                              gateway, NUM_CORES_CLIENT, ENABLE_DIRECTPATH, True, False)
 
+if LARGE_CLIENT_QUEUES:
+    # need to bypass things at clients and agents. Might need to be sending netbench to agents too
+    # if my changes involve it (and not just stats changes in netbench)
+    # - client
+    cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/rpc.h"\
+            " {}@{}:~/{}/{}/breakwater/inc/breakwater/"\
+            .format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, KERNEL_NAME)
+    execute_local(cmd)
+    for agent in AGENTS:
+        cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/rpc.h"\
+                " {}@{}:~/{}/{}/breakwater/inc/breakwater/ >/dev/null"\
+                .format(KEY_LOCATION, USERNAME, agent, ARTIFACT_PATH, KERNEL_NAME)
+        execute_local(cmd)
+
 if DOWNLOAD_RAW:
     # - client
     cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/netbench.cc"\
@@ -330,9 +349,9 @@ for offered_load in OFFERED_LOADS:
     print("\tExecuting client...")
     client_agent_sessions = []
     cmd = "cd ~/{} && sudo ./{}/breakwater/apps/netbench/netbench"\
-            " {} client.config client {:d} {} {:d} {} {:d} {:d} {:d}"\
+            " {} client.config client {:d} {} {:d} {} {:d} {:d} {:d} {:d}"\
             " >stdout.out 2>&1".format(ARTIFACT_PATH, KERNEL_NAME, OVERLOAD_ALG, NUM_CONNS,
-                    server_ip, ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load)
+                    server_ip, ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load, LOADSHIFT)
     client_agent_sessions += execute_remote([client_conn], cmd, False)
 
     sleep(1)
@@ -340,8 +359,8 @@ for offered_load in OFFERED_LOADS:
     # - agent
     print("\tExecuting agents...")
     cmd = "cd ~/{} && sudo ./{}/breakwater/apps/netbench/netbench"\
-            " {} client.config agent {} >stdout.out 2>&1"\
-            .format(ARTIFACT_PATH, KERNEL_NAME, OVERLOAD_ALG, client_ip)
+            " {} client.config agent {} {:d} >stdout.out 2>&1"\
+            .format(ARTIFACT_PATH, KERNEL_NAME, OVERLOAD_ALG, client_ip, LOADSHIFT)
     client_agent_sessions += execute_remote(agent_conns, cmd, False)
 
     # Wait for client and agents
@@ -499,7 +518,7 @@ if IAS_DEBUG:
           " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/stdout.out {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
     execute_local(cmd)
     if DOWNLOAD_RAW:
-        print("stdout client node 1")
+        print("server dropped tasks")
         cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
             " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/server_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
         execute_local(cmd)
@@ -542,6 +561,7 @@ if ENABLE_ANTAGONIST:
     script_config += "antagonist threads: {}, work_unit {}, command line arg: {}\n".format(threads, work_units, antagonist_param)
 script_config += "RTT: {}\n".format(NET_RTT)
 script_config += "SLO: {}\n".format(slo)
+script_config += "Connections: {:d}\n".format(NUM_CONNS)
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 

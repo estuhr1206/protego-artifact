@@ -77,6 +77,11 @@ constexpr uint64_t kRTT = 10;
 std::vector<double> offered_loads;
 double offered_load;
 
+std::vector<std::pair<double, uint64_t>> rates = {{400000, 2500000}, {1400000, 500000}, {850000, 1000000}};
+// 0: steady state
+// 1: load shift
+int experiment_type = 0;
+
 static SyntheticWorker *workers[NCPU];
 
 /* server-side stat */
@@ -1067,6 +1072,10 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	    << cs->max_percli_tput << "," << cs->winu_rx_pps << ","
 	    << cs->resp_rx_pps << "," << cs->req_tx_pps << ","
 	    << cs->win_expired_wps << "," << cs->req_dropped_rps << std::endl;
+  if (offered_loads.size() > 1) {
+    std::cout << "MORE THAN 1 LOAD CALCULATED" << std::endl;
+  }
+  
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
           << cs->offered_rps << "," << cs->rps << "," << cs->goodput << ","
@@ -1177,6 +1186,51 @@ void SteadyStateExperiment(int threads, double offered_rps,
   PrintStatResults(w, &cs, &ss);
 }
 
+void LoadShiftExperiment(int threads, double service_time) {
+  struct sstat ss;
+  struct cstat_raw csr;
+  struct cstat cs;
+  double elapsed;
+
+  memset(&csr, 0, sizeof(csr));
+
+  std::vector<work_unit> w = RunExperiment(threads, &csr, &ss, &elapsed,[=] {
+    std::mt19937 rg(rand());
+    std::mt19937 wg(rand());
+    std::exponential_distribution<double> wd(1.0 / service_time);
+    std::vector<work_unit> w_temp;
+    uint64_t last_us = 0;
+    for (auto &r : rates) {
+      std::exponential_distribution<double> rd(
+          1.0 / (1000000.0 / (r.first / static_cast<double>(threads))));
+      auto work = GenerateWork(std::bind(rd, rg), std::bind(wd, wg), last_us,
+                               last_us + r.second);
+      last_us = work.back().start_us;
+      w_temp.insert(w_temp.end(), work.begin(), work.end());
+    }
+    return w_temp;
+  });
+
+  if (b) {
+    if (!b->EndExperiment(w, &csr)) return;
+  }
+
+  cs = cstat{csr.offered_rps,
+             csr.rps,
+             csr.goodput,
+             csr.min_percli_tput,
+             csr.max_percli_tput,
+             static_cast<double>(csr.winu_rx) / elapsed * 1000000,
+             static_cast<double>(csr.winu_tx) / elapsed * 1000000,
+             static_cast<double>(csr.resp_rx) / elapsed * 1000000,
+             static_cast<double>(csr.req_tx) / elapsed * 1000000,
+             static_cast<double>(csr.win_expired) / elapsed * 1000000,
+             static_cast<double>(csr.req_dropped) / elapsed * 1000000};
+
+  // Print the results.
+  PrintStatResults(w, &cs, &ss);
+}
+
 int StringToAddr(const char *str, uint32_t *addr) {
   uint8_t a, b, c, d;
 
@@ -1196,9 +1250,12 @@ void AgentHandler(void *arg) {
   BUG_ON(!b);
 
   calculate_rates();
-
-  for (double i : offered_loads) {
-    SteadyStateExperiment(threads, i, st);
+  if (experiment_type == 1) {
+    LoadShiftExperiment(threads, st);
+  } else {
+    for (double i : offered_loads) {
+      SteadyStateExperiment(threads, i, st);
+    }
   }
 }
 
@@ -1219,9 +1276,18 @@ void ClientHandler(void *arg) {
   /* Print Header */
   PrintHeader(std::cout);
 
-  for (double i : offered_loads) {
-    SteadyStateExperiment(threads, i, st);
+  // for (double i : offered_loads) {
+  //   SteadyStateExperiment(threads, i, st);
+  //   rt::Sleep(1000000);
+  // }
+  if (experiment_type == 1) {
+    LoadShiftExperiment(threads, st);
     rt::Sleep(1000000);
+  } else {
+    for (double i : offered_loads) {
+      SteadyStateExperiment(threads, i, st);
+      rt::Sleep(1000000);
+    }
   }
 
   pos = json_out.tellp();
@@ -1274,13 +1340,15 @@ int main(int argc, char *argv[]) {
       return ret;
     }
   } else if (cmd.compare("agent") == 0) {
-    if (argc < 5 || StringToAddr(argv[4], &master.ip)) {
-    std::cerr << "usage: [alg] [cfg_file] agent [client_ip]\n"
+    if (argc < 6 || StringToAddr(argv[4], &master.ip)) {
+    std::cerr << "usage: [alg] [cfg_file] agent [client_ip] [experiment_type]\n"
 	      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
 	      << "\tcfg_file: Shenango configuration file\n"
-	      << "\tclient_ip: Client IP address" << std::endl;
+	      << "\tclient_ip: Client IP address\n"
+        << "\texperiment_type: 0 for steady state, 1 for load shift" << std::endl;
       return -EINVAL;
     }
+    experiment_type = std::stoi(argv[11], nullptr, 0);
 
     ret = runtime_init(argv[2], AgentHandler, NULL);
     if (ret) {
@@ -1296,10 +1364,10 @@ int main(int argc, char *argv[]) {
     return -EINVAL;
   }
 
-  if (argc < 11) {
+  if (argc < 12) {
     std::cerr << "usage: [alg] [cfg_file] client [nclients] "
 		 "[server_ip] [service_us] [service_dist] [slo] [nagents] "
-		 "[offered_load]\n"
+		 "[offered_load] [experiment_type]\n"
 	      << "\talg: overload control algorithms (breakwater/seda/dagor)\n"
 	      << "\tcfg_file: Shenango configuration file\n"
 	      << "\tnclients: the number of client connections\n"
@@ -1308,10 +1376,12 @@ int main(int argc, char *argv[]) {
 	      << "\tservice_dist: request processing time distribution (exp/const/bimod)\n"
 	      << "\tslo: RPC service level objective (in us)\n"
 	      << "\tnagents: the number of agents\n"
-	      << "\toffered_load: load geneated by client and agents in requests per second"
+	      << "\toffered_load: load geneated by client and agents in requests per second\n"
+        << "\texperiment_type: 0 for steady state, 1 for load shift"
 	      << std::endl;
     return -EINVAL;
   }
+  experiment_type = std::stoi(argv[11], nullptr, 0);
 
   threads = std::stoi(argv[4], nullptr, 0);
 
