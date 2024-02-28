@@ -20,9 +20,9 @@
 */
 
 /* delay threshold to detect congestion */
-#define SBW_MIN_DELAY_US		45
+#define SBW_MIN_DELAY_US		10
 /* delay threshold for AQM */
-#define SBW_DROP_THRESH			90
+#define SBW_DROP_THRESH			20
 
 /* round trip time in us */
 #define SBW_RTT_US			10

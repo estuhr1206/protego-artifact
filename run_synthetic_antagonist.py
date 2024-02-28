@@ -13,18 +13,18 @@ import random
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "nocontrol"
+OVERLOAD_ALG = "breakwater"
 
 # The number of client connections
-NUM_CONNS = 1000
+NUM_CONNS = 10
 
 # Average service time (in us)
 ST_AVG = 10
 
 # make sure these match in bw_config.h
 # Too lazy to do a sed command or similar right now TODO
-BW_TARGET = 80
-BW_THRESHOLD = 160
+BW_TARGET = 10
+BW_THRESHOLD = 20
 
 # Service time distribution
 #    exp: exponential
@@ -39,32 +39,32 @@ ST_DIST = "exp"
 # OFFERED_LOADS = [400000, 800000, 1200000]
 # OFFERED_LOADS = [400000, 800000, 1000000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
 # loadshift = 1 for load shifts in netbench.cc
-LOADSHIFT = 0
-OFFERED_LOADS = [1600000]
+LOADSHIFT = 1
+OFFERED_LOADS = [0]
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = True # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
+SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
 NUM_CORES_SERVER = 18
 NUM_CORES_LC = 16
-NUM_CORES_LC_GUARANTEED = 16
+NUM_CORES_LC_GUARANTEED = 0
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
 
 LARGE_CLIENT_QUEUES = False
 
-DOWNLOAD_RAW = False
+DOWNLOAD_RAW = True
 
 ENABLE_ANTAGONIST = False
 
-IAS_DEBUG = False
+IAS_DEBUG = True
 
-ERIC_CSV_NAMING = False
+ERIC_CSV_NAMING = True
 
 # number of threads for antagonist
 threads = 18
@@ -226,7 +226,7 @@ generate_shenango_config(True, server_conn, server_ip, netmask, gateway,
                          NUM_CORES_LC, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
                          latency_critical=True, guaranteed_kthread=NUM_CORES_LC_GUARANTEED)
 generate_shenango_config(True, server_conn, antagonist_ip, netmask, gateway,
-                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG,
+                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, False, DISABLE_WATCHDOG,
                          latency_critical=False, guaranteed_kthread=0, antagonist="antagonist.config")
 generate_shenango_config(False, client_conn, client_ip, netmask, gateway,
                          NUM_CORES_CLIENT, ENABLE_DIRECTPATH, True, False)
@@ -234,21 +234,22 @@ for i in range(NUM_AGENT):
     generate_shenango_config(False, agent_conns[i], agent_ips[i], netmask,
                              gateway, NUM_CORES_CLIENT, ENABLE_DIRECTPATH, True, False)
 
-if LARGE_CLIENT_QUEUES:
-    # need to bypass things at clients and agents. Might need to be sending netbench to agents too
-    # if my changes involve it (and not just stats changes in netbench)
-    # - client
-    cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/rpc.h"\
-            " {}@{}:~/{}/{}/breakwater/inc/breakwater/"\
-            .format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, KERNEL_NAME)
+replace_dir = "replace" if LARGE_CLIENT_QUEUES else "replace_original"
+# need to bypass things at clients and agents. Might need to be sending netbench to agents too
+# if my changes involve it (and not just stats changes in netbench)
+print("if large queues, make sure that bw_config.h has a longer queue value defined")
+# - client
+cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}/rpc.h"\
+        " {}@{}:~/{}/{}/breakwater/inc/breakwater/"\
+        .format(KEY_LOCATION, replace_dir, USERNAME, CLIENT, ARTIFACT_PATH, KERNEL_NAME)
+execute_local(cmd)
+for agent in AGENTS:
+    cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}/rpc.h"\
+            " {}@{}:~/{}/{}/breakwater/inc/breakwater/ >/dev/null"\
+            .format(KEY_LOCATION, replace_dir, USERNAME, agent, ARTIFACT_PATH, KERNEL_NAME)
     execute_local(cmd)
-    for agent in AGENTS:
-        cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/rpc.h"\
-                " {}@{}:~/{}/{}/breakwater/inc/breakwater/ >/dev/null"\
-                .format(KEY_LOCATION, USERNAME, agent, ARTIFACT_PATH, KERNEL_NAME)
-        execute_local(cmd)
 
-if DOWNLOAD_RAW:
+if DOWNLOAD_RAW or LOADSHIFT > 0:
     # - client
     cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no replace/netbench.cc"\
             " {}@{}:~/{}/{}/breakwater/apps/netbench/"\
@@ -469,6 +470,7 @@ execute_local(cmd)
 
 if ERIC_CSV_NAMING:
     cmd = "mv {}/{}.csv {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix, run_dir, eric_prefix)
+    execute_local(cmd)
 
 if DOWNLOAD_RAW:
     print("Fetching raw output (all non rejected tasks)")
@@ -545,7 +547,11 @@ if ENABLE_ANTAGONIST:
     execute_local(cmd)
 cmd = "cp configs/bw_config.h {}/".format(config_dir)
 execute_local(cmd)
+cmd = "cp replace/rpc.h {}/".format(config_dir)
+execute_local(cmd)
+
 script_config = "overload algorithm: {}\n".format(OVERLOAD_ALG)
+script_config += "number of nodes: {}\n".format(len(NODES))
 script_config += "number of connections: {}\n".format(NUM_CONNS)
 script_config += "service time distribution: {}\n".format(ST_DIST)
 script_config += "average service time: {}\n".format(ST_AVG)
@@ -562,6 +568,8 @@ if ENABLE_ANTAGONIST:
 script_config += "RTT: {}\n".format(NET_RTT)
 script_config += "SLO: {}\n".format(slo)
 script_config += "Connections: {:d}\n".format(NUM_CONNS)
+script_config += "loadshift: {}\n".format(LOADSHIFT)
+script_config += "long queues enabled: {}".format(LARGE_CLIENT_QUEUES)
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 

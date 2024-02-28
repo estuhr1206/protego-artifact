@@ -78,9 +78,12 @@ std::vector<double> offered_loads;
 double offered_load;
 
 std::vector<std::pair<double, uint64_t>> rates = {{400000, 2500000}, {1400000, 500000}, {850000, 1000000}};
+
+/// ERIC
 // 0: steady state
 // 1: load shift
 int experiment_type = 0;
+/// END ERIC
 
 static SyntheticWorker *workers[NCPU];
 
@@ -700,6 +703,7 @@ std::vector<work_unit> RunExperiment(
   // ERIC
   uint64_t client_drop = 0;
   std::vector<work_unit> client_drop_tasks;
+  uint64_t offered_after_warmup = 0;
   // END ERIC
 
   for (int i = 0; i < threads; ++i) {
@@ -714,6 +718,7 @@ std::vector<work_unit> RunExperiment(
                           return ((s.start_us + s.duration_us) < kWarmUpTime);
                         }), v.end());
     // ERIC
+    offered_after_warmup += v.size();
     client_drop += std::count_if(v.begin(), v.end(), [](const work_unit &s) {
       return (s.duration_us == 0);
     });
@@ -760,9 +765,14 @@ std::vector<work_unit> RunExperiment(
 
   // Report results.
   if (csr) {
-    csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
-    csr->offered_rps *=
-        static_cast<double>(kExperimentTime - kWarmUpTime) / kExperimentTime;
+    /// ERIC
+    if (experiment_type == 1) {
+      csr->offered_rps = static_cast<double>(offered_after_warmup) / elapsed_ * 1000000;
+    } else {
+      csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
+      csr->offered_rps *= static_cast<double>(kExperimentTime - kWarmUpTime) / kExperimentTime;
+    }
+    
     csr->rps = static_cast<double>(w.size()) / elapsed_ * 1000000;
     csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
@@ -1200,7 +1210,7 @@ void LoadShiftExperiment(int threads, double service_time) {
     std::exponential_distribution<double> wd(1.0 / service_time);
     std::vector<work_unit> w_temp;
     uint64_t last_us = 0;
-    for (auto &r : rates) {
+    for (std::pair<double,uint64_t> &r : rates) {
       std::exponential_distribution<double> rd(
           1.0 / (1000000.0 / (r.first / static_cast<double>(threads))));
       auto work = GenerateWork(std::bind(rd, rg), std::bind(wd, wg), last_us,
