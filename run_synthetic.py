@@ -11,7 +11,7 @@ from config_remote import *
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "protego"
+OVERLOAD_ALG = "breakwater"
 
 # The number of client connections
 NUM_CONNS = 1000
@@ -26,17 +26,17 @@ ST_AVG = 10
 ST_DIST = "exp"
 
 # List of offered load
-OFFERED_LOADS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
-                110, 120, 130, 140, 150, 160]
+OFFERED_LOADS = [850000]
+# OFFERED_LOADS = [400000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
 
-for i in range(len(OFFERED_LOADS)):
-    OFFERED_LOADS[i] *= 10000
+# for i in range(len(OFFERED_LOADS)):
+#     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
 SPIN_SERVER = False
 DISABLE_WATCHDOG = False
 
-NUM_CORES_SERVER = 4
+NUM_CORES_SERVER = 10
 NUM_CORES_CLIENT = 16
 
 ############################
