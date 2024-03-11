@@ -5,57 +5,75 @@ import os
 from time import sleep
 from util import *
 from config_remote import *
+import sys
+from datetime import datetime
 
 ################################
 ### Experiemnt Configuration ###
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "breakwater"
+OVERLOAD_ALG = sys.argv[1]
 
 # The number of client connections
-NUM_CONNS = 100
+NUM_CONNS = int(sys.argv[2])
 
 # Average service time (in us)
-ST_AVG = 10 
+ST_AVG = int(sys.argv[3])
+
+BW_TARGET = int(sys.argv[4])
+BW_THRESHOLD = int(sys.argv[4]) * 2
+print("modifying bw_config.h values for target and threshold")
+cmd = "sed -i \'s/#define SBW_DELAY_TARGET.*/#define SBW_DELAY_TARGET\\t\\t\\t{:d}/g\'"\
+        " configs/bw_config.h".format(BW_TARGET)
+execute_local(cmd)
+cmd = "sed -i \'s/#define SBW_DROP_THRESH.*/#define SBW_DROP_THRESH\\t\\t\\t{:d}/g\'"\
+        " configs/bw_config.h".format(BW_THRESHOLD)
+execute_local(cmd)
 
 # Service time distribution
 #    exp: exponential
 #    const: constant
 #    bimod: bimodal
-ST_DIST = "exp"
+ST_DIST = sys.argv[5]
 
 # List of offered load
-# OFFERED_LOADS = [850000]
+# OFFERED_LOADS = [int(sys.argv[6])]
 OFFERED_LOADS = [400000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
 
-# for i in range(len(OFFERED_LOADS)):
-#     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = False
+SPIN_SERVER = int(sys.argv[8])
 DISABLE_WATCHDOG = False
 
-NUM_CORES_SERVER = 16
+NUM_CORES_SERVER = int(sys.argv[9])
+NUM_CORES_LC = int(sys.argv[10])
+NUM_CORES_LC_GUARANTEED = int(sys.argv[11])
 NUM_CORES_CLIENT = 16
+
+ERIC_CSV_NAMING = True
+CSV_NAME_DIR = True
 
 ############################
 ### End of configuration ###
 ############################
 
 # SLO = 10 * (average RPC processing time + network RTT)
-NET_RTT = 10
-slo = (ST_AVG + NET_RTT) * 10
-slo = 200
+# slo = (ST_AVG + NET_RTT) * 10
+slo = int(sys.argv[13])
 
 # Verify configs #
-if OVERLOAD_ALG not in ["protego", "breakwater", "seda", "dagor", "nocontrol"]:
+if OVERLOAD_ALG not in ["breakwater", "seda", "dagor", "nocontrol"]:
     print("Unknown overload algorithm: " + OVERLOAD_ALG)
     exit()
 
 if ST_DIST not in ["exp", "const", "bimod"]:
     print("Unknown service time distribution: " + ST_DIST)
     exit()
+
+cmd = "sed -i \'s/#define SBW_RTT_US.*/#define SBW_RTT_US\\t\\t\\t{:d}/g\'"\
+        " configs/bw_config.h".format(NET_RTT)
+execute_local(cmd)
 
 ### Function definitions ###
 def generate_shenango_config(is_server ,conn, ip, netmask, gateway, num_cores,
@@ -121,8 +139,6 @@ for agent in AGENTS:
     agent_conn.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     agent_conn.connect(hostname = agent, username = USERNAME, pkey = k)
     agent_conns.append(agent_conn)
-
-
 print ("number of agents: {:d}".format(NUM_AGENT))
 # Clean-up environment
 print("Cleaning up machines...")
@@ -135,32 +151,21 @@ sleep(1)
 cmd = "cd ~/{} && rm output.csv output.json".format(ARTIFACT_PATH)
 execute_remote([client_conn], cmd, True, False)
 
-# Distributing sources
-print("Distributing sources...")
-repo_name = (os.getcwd().split('/'))[-1]
-# - server
-for server in NODES:
-    cmd = "rsync -azh -e \"ssh -i {} -o StrictHostKeyChecking=no"\
-            " -o UserKnownHostsFile=/dev/null\" --progress ../{}/shenango/"\
-            " {}@{}:~/{}/shenango >/dev/null"\
-            .format(KEY_LOCATION, repo_name, USERNAME, server, ARTIFACT_PATH)
-    execute_local(cmd)
-
 # Distribuing config files
 print("Distributing configs...")
 # - server
-cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*.h"\
+cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*"\
         " {}@{}:~/{}/shenango/breakwater/src/ >/dev/null"\
         .format(KEY_LOCATION, USERNAME, SERVERS[0], ARTIFACT_PATH)
 execute_local(cmd)
 # - client
-cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*.h"\
+cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*"\
         " {}@{}:~/{}/shenango/breakwater/src/ >/dev/null"\
         .format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH)
 execute_local(cmd)
 # - agents
 for agent in AGENTS:
-    cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*.h"\
+    cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no configs/*"\
             " {}@{}:~/{}/shenango/breakwater/src/ >/dev/null"\
             .format(KEY_LOCATION, USERNAME, agent, ARTIFACT_PATH)
     execute_local(cmd)
@@ -168,7 +173,7 @@ for agent in AGENTS:
 # Generating config files
 print("Generating config files...")
 generate_shenango_config(True, server_conn, server_ip, netmask, gateway,
-                         NUM_CORES_SERVER, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG)
+                         NUM_CORES_LC, ENABLE_DIRECTPATH, SPIN_SERVER, DISABLE_WATCHDOG)
 generate_shenango_config(False, client_conn, client_ip, netmask, gateway,
                          NUM_CORES_CLIENT, ENABLE_DIRECTPATH, True, False)
 for i in range(NUM_AGENT):
@@ -196,26 +201,30 @@ for agent in AGENTS:
 print("Building Shenango...")
 cmd = "cd ~/{}/shenango && make clean && make && make -C bindings/cc"\
         .format(ARTIFACT_PATH)
-execute_remote([server_conn, client_conn] + agent_conns, cmd, True)
+execute_remote([server_conn, client_conn] + agent_conns,
+               cmd, True)
 
 # Build Breakwater
 print("Building Breakwater...")
 cmd = "cd ~/{}/shenango/breakwater && make clean && make && make -C bindings/cc"\
         .format(ARTIFACT_PATH)
-execute_remote([server_conn, client_conn] + agent_conns, cmd, True)
+execute_remote([server_conn, client_conn] + agent_conns,
+                 cmd, True)
 
 # Build Netbench
 print("Building netbench...")
 cmd = "cd ~/{}/shenango/breakwater/apps/netbench && make clean && make"\
         .format(ARTIFACT_PATH)
-execute_remote([server_conn, client_conn] + agent_conns, cmd, True)
+execute_remote([server_conn, client_conn] + agent_conns,
+                cmd, True)
 
 # Execute IOKernel
 iok_sessions = []
 print("Executing IOKernel...")
-cmd = "cd ~/{}/shenango && sudo ./iokerneld".format(ARTIFACT_PATH)
-iok_sessions += execute_remote([server_conn, client_conn] + agent_conns,
-                               cmd, False)
+cmd = "cd ~/{}/shenango && sudo ./iokerneld > iokernel.node-0.log".format(ARTIFACT_PATH)
+iok_sessions += execute_remote([server_conn], cmd, False)
+cmd = "cd ~/{}/shenango && sudo ./iokerneld > iokernel.node-1.log".format(ARTIFACT_PATH)
+iok_sessions += execute_remote([client_conn] + agent_conns, cmd, False)
 
 sleep(1)
 
@@ -233,12 +242,19 @@ for offered_load in OFFERED_LOADS:
     sleep(1)
 
     # - client
+    # print("\tExecuting client...")
+    # client_agent_sessions = []
+    # cmd = "cd ~/{} && sudo ./shenango/breakwater/apps/netbench/netbench"\
+    #         " {} client.config client {:d} {} {:d} {} {:d} {:d} {:d}"\
+    #         " >stdout.out 2>&1".format(ARTIFACT_PATH, OVERLOAD_ALG, NUM_CONNS,
+    #                 server_ip, ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load)
+    # client_agent_sessions += execute_remote([client_conn], cmd, False)
     print("\tExecuting client...")
     client_agent_sessions = []
     cmd = "cd ~/{} && sudo ./shenango/breakwater/apps/netbench/netbench"\
             " {} client.config client {:d} {:f} {} {:d} {:d} {:d} {:d} {} {:d}"\
             " >stdout.out 2>&1".format(ARTIFACT_PATH, OVERLOAD_ALG, NUM_CONNS,
-                    ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load, 0, server_ip, 1)
+                    ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load, 0, server_ip, 1) # the 0 is for no loadshifts
     client_agent_sessions += execute_remote([client_conn], cmd, False)
 
     sleep(1)
@@ -289,15 +305,28 @@ cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}@{}:~/{}/output.csv ./"\
 execute_local(cmd)
 
 output_prefix = "{}".format(OVERLOAD_ALG)
+eric_prefix = "{}".format(OVERLOAD_ALG)
+
+if OVERLOAD_ALG == "breakwater":
+    eric_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+    output_prefix += "_{:d}_{:d}".format(BW_TARGET, BW_THRESHOLD)
+
+if SPIN_SERVER or NUM_CORES_LC_GUARANTEED > 0:
+    eric_prefix += "_guaranteed"
 
 if SPIN_SERVER:
     output_prefix += "_spin"
+    eric_prefix += "_spinning"
 
 if DISABLE_WATCHDOG:
     output_prefix += "_nowd"
 
 output_prefix += "_{}_{:d}_nconn_{:d}".format(ST_DIST, ST_AVG, NUM_CONNS)
+eric_prefix += "_{:d}k".format(int(OFFERED_LOADS[0] / 1000))
+eric_prefix += "_{:d}conns".format(NUM_CONNS)
+eric_prefix += "_{:d}nodes".format(len(AGENTS) + 2)
 
+# Print Headers
 # Print Headers
 header = "num_clients,offered_load,throughput,goodput,cpu"\
         ",min,mean,p50,p90,p99,p999,p9999,max"\
@@ -311,15 +340,103 @@ header = "num_clients,offered_load,throughput,goodput,cpu"\
         ",client:ecredit_rx_pps,client:cupdate_tx_pps"\
         ",client:resp_rx_pps,client:req_tx_pps"\
         ",client:credit_expired_cps,client:req_dropped_rps"
-cmd = "echo \"{}\" > outputs/{}.csv".format(header, output_prefix)
+# cmd = "echo \"{}\" > outputs/{}.csv".format(header, output_prefix)
+# execute_local(cmd)
+
+# cmd = "cat output.csv >> outputs/{}.csv".format(output_prefix)
+# execute_local(cmd)
+
+# # Remove temp outputs
+# cmd = "rm output.csv"
+# execute_local(cmd, False)
+
+# print("Output generated: outputs/{}.csv".format(output_prefix))
+# print("Done.")
+
+curr_date = datetime.now().strftime("%m_%d_%Y")
+curr_time = datetime.now().strftime("%H-%M-%S")
+output_dir = "outputs/{}".format(curr_date)
+if not os.path.isdir(output_dir):
+   os.makedirs(output_dir)
+
+run_dir = output_dir + "/" + curr_time
+if not os.path.isdir(run_dir):
+   os.makedirs(run_dir)
+
+cmd = "echo \"{}\" > {}/{}.csv".format(header, run_dir, curr_time + "-" + output_prefix)
 execute_local(cmd)
 
-cmd = "cat output.csv >> outputs/{}.csv".format(output_prefix)
+cmd = "cat output.csv >> {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix)
 execute_local(cmd)
+
+if ERIC_CSV_NAMING:
+    cmd = "mv {}/{}.csv {}/{}.csv".format(run_dir, curr_time + "-" + output_prefix, run_dir, eric_prefix)
+    execute_local(cmd)
 
 # Remove temp outputs
 cmd = "rm output.csv"
 execute_local(cmd, False)
 
-print("Output generated: outputs/{}.csv".format(output_prefix))
+
+print("stdout node 0")
+cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+        " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/stdout.out {}/ >/dev/null".format(KEY_LOCATION, USERNAME, SERVERS[0], ARTIFACT_PATH, run_dir)
+execute_local(cmd)
+
+
+cmd = "mv {}/stdout.out {}/stdout_server.out".format(run_dir, run_dir)
+execute_local(cmd)
+
+print("iokernel log node 1")
+cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+        " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/shenango/iokernel.node-1.log {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
+execute_local(cmd)
+
+print("stdout client node 1")
+cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+        " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/stdout.out {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
+execute_local(cmd)
+
+print("gathering config options for this experiment")
+config_dir = run_dir + "/config"
+if not os.path.isdir(config_dir):
+   os.makedirs(config_dir)
+
+cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}@{}:~/{}/server.config {}/"\
+        " >/dev/null".format(KEY_LOCATION, USERNAME, SERVERS[0], ARTIFACT_PATH, config_dir)
+execute_local(cmd)
+cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}@{}:~/{}/client.config {}/"\
+        " >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, config_dir)
+execute_local(cmd)
+
+cmd = "cp configs/bw_config.h {}/".format(config_dir)
+execute_local(cmd)
+script_config = "overload algorithm: {}\n".format(OVERLOAD_ALG)
+script_config += "number of nodes: {}\n".format(len(NODES))
+script_config += "number of connections: {}\n".format(NUM_CONNS)
+script_config += "service time distribution: {}\n".format(ST_DIST)
+script_config += "average service time: {}\n".format(ST_AVG)
+script_config += "offered load: {}\n".format(OFFERED_LOADS[0])
+script_config += "server cores: {}\n".format(NUM_CORES_SERVER)
+script_config += "LC cores: {}\n".format(NUM_CORES_LC)
+script_config += "LC guaranteed cores: {}\n".format(NUM_CORES_LC_GUARANTEED)
+if SPIN_SERVER:
+    script_config += "server cores spinning for LC\n"
+script_config += "client cores: {}\n".format(NUM_CORES_CLIENT)
+script_config += "RTT: {}\n".format(NET_RTT)
+script_config += "SLO: {}\n".format(slo)
+script_config += "Connections: {:d}\n".format(NUM_CONNS)
+
+cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
+execute_local(cmd)
+
+if CSV_NAME_DIR:
+    os.chdir(output_dir)
+    if os.path.isdir(eric_prefix):
+        print("error, desired directory name is already an output directory")
+        exit()
+    os.rename(curr_time, eric_prefix)
+    os.chdir("..")
+
 print("Done.")
+# TODO make sure the output stuff is consistent across run scripts
