@@ -23,8 +23,8 @@ ST_AVG = 10
 
 # make sure these match in bw_config.h
 # Too lazy to do a sed command or similar right now TODO
-BW_TARGET = 10
-BW_THRESHOLD = 20
+BW_TARGET = 80
+BW_THRESHOLD = 160
 print("modifying bw_config.h values for target and threshold")
 cmd = "sed -i \'s/#define SBW_MIN_DELAY_US.*/#define SBW_MIN_DELAY_US\\t\\t\\t{:d}/g\'"\
         " configs/bw_config.h".format(BW_TARGET)
@@ -39,26 +39,28 @@ execute_local(cmd)
 #    bimod: bimodal
 ST_DIST = "exp"
 
+SCHEDULER = "ias"
+
 # List of offered load
 # OFFERED_LOADS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
-# OFFERED_LOADS = [400000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
+OFFERED_LOADS = [400000, 600000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
 # loadshift = 1 for load shifts in netbench.cc
-LOADSHIFT = 1
-OFFERED_LOADS = [850000]
+LOADSHIFT = 0
+# OFFERED_LOADS = [850000]
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
+SPIN_SERVER = True # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
 NUM_CORES_SERVER = 18
 NUM_CORES_LC = 16
-NUM_CORES_LC_GUARANTEED = 0
+NUM_CORES_LC_GUARANTEED = 16
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
@@ -69,7 +71,7 @@ DOWNLOAD_RAW = True
 
 ENABLE_ANTAGONIST = False
 
-IAS_DEBUG = True
+IAS_DEBUG = False
 
 ERIC_CSV_NAMING = True
 
@@ -291,9 +293,11 @@ cmd = "cd ~/{}/{}/breakwater/apps/netbench && make clean && make"\
 execute_remote([server_conn, client_conn] + agent_conns, cmd, True)
 
 # Execute IOKernel
+# TODO test with and without ias. ias is how we debug currently, but
+# breakwater artifact ran with simple
 iok_sessions = []
 print("starting server IOKernel")
-cmd = "cd ~/{}/{} && sudo ./iokerneld ias 2>&1 | ts %s > iokernel.node-0.log".format(ARTIFACT_PATH, KERNEL_NAME)
+cmd = "cd ~/{}/{} && sudo ./iokerneld {} 2>&1 | ts %s > iokernel.node-0.log".format(ARTIFACT_PATH, KERNEL_NAME, SCHEDULER)
 iok_sessions += execute_remote([server_conn], cmd, False)
 
 print("starting client/agent IOKernel")
@@ -437,6 +441,7 @@ output_prefix += "_{:d}load".format(OFFERED_LOADS[0])
 eric_prefix += "_{:d}k".format(int(OFFERED_LOADS[0] / 1000))
 eric_prefix += "_{:d}conns".format(NUM_CONNS)
 eric_prefix += "_{:d}nodes".format(len(NODES))
+eric_prefix += "_{}".format(SCHEDULER)
 
 output_prefix += "_{}_{:d}_nconn_{:d}".format(ST_DIST, ST_AVG, NUM_CONNS)
 
@@ -564,6 +569,7 @@ script_config += "RTT: {}\n".format(NET_RTT)
 script_config += "SLO: {}\n".format(slo)
 script_config += "Connections: {:d}\n".format(NUM_CONNS)
 script_config += "loadshift: {}\n".format(LOADSHIFT)
+script_config += "scheduler: {}".format(SCHEDULER)
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 
@@ -574,4 +580,13 @@ if IAS_DEBUG and not AVOID_LARGE_DOWNLOADS:
     execute_local(cmd)
 
 print("Done.")
+
+if CSV_NAME_DIR:
+    os.chdir(output_dir)
+    if os.path.isdir(eric_prefix):
+        print("error, desired directory name is already an output directory")
+        exit()
+    os.rename(curr_time, eric_prefix)
+    os.chdir("..")
+
 # TODO make sure the output stuff is consistent across run scripts

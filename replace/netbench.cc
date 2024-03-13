@@ -1358,7 +1358,7 @@ int main(int argc, char *argv[]) {
         << "\texperiment_type: 0 for steady state, 1 for load shift" << std::endl;
       return -EINVAL;
     }
-    experiment_type = std::stoi(argv[11], nullptr, 0);
+    experiment_type = std::stoi(argv[5], nullptr, 0);
 
     ret = runtime_init(argv[2], AgentHandler, NULL);
     if (ret) {
