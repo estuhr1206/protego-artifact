@@ -688,7 +688,7 @@ std::vector<work_unit> RunExperiment(
       csr->resp_rx += c->StatRespRx();
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
-      // csr->req_dropped += c->StatReqDropped();
+      csr->req_dropped += c->StatReqDropped();
       c->Close();
     }
   }
@@ -777,7 +777,7 @@ std::vector<work_unit> RunExperiment(
     csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
     csr->max_percli_tput = max_throughput;
-    csr->req_dropped = client_drop;
+    // csr->req_dropped = client_drop;
   }
 
   if ((!b || b->IsLeader()) && ss) {

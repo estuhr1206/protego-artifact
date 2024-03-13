@@ -7,24 +7,25 @@ from util import *
 from config_remote import *
 from datetime import datetime
 import random
+import sys
 
 ################################
 ### Experiemnt Configuration ###
 ################################
 
 # Server overload algorithm (protego, breakwater, seda, dagor, nocontrol)
-OVERLOAD_ALG = "breakwater"
+OVERLOAD_ALG = sys.argv[1]
 
 # The number of client connections
-NUM_CONNS = 100
+NUM_CONNS = int(sys.argv[2])
 
 # Average service time (in us)
-ST_AVG = 10
+ST_AVG = int(sys.argv[3])
 
 # make sure these match in bw_config.h
 # Too lazy to do a sed command or similar right now TODO
-BW_TARGET = 10
-BW_THRESHOLD = 20
+BW_TARGET = int(sys.argv[4])
+BW_THRESHOLD = int(sys.argv[4]) * 2
 print("modifying bw_config.h values for target and threshold")
 cmd = "sed -i \'s/#define SBW_MIN_DELAY_US.*/#define SBW_MIN_DELAY_US\\t\\t\\t{:d}/g\'"\
         " configs/bw_config.h".format(BW_TARGET)
@@ -37,46 +38,46 @@ execute_local(cmd)
 #    exp: exponential
 #    const: constant
 #    bimod: bimodal
-ST_DIST = "exp"
+ST_DIST = sys.argv[5]
 
 # List of offered load
 # OFFERED_LOADS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
 #                 110, 120, 130, 140, 150, 160]
 
 # OFFERED_LOADS = [400000, 800000, 1200000]
+OFFERED_LOADS = [int(sys.argv[6])]
 # OFFERED_LOADS = [400000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
+
 # loadshift = 1 for load shifts in netbench.cc
-LOADSHIFT = 1
-OFFERED_LOADS = [850000]
+LOADSHIFT = int(sys.argv[7])
 
 # for i in range(len(OFFERED_LOADS)):
 #     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
+SPIN_SERVER = int(sys.argv[8]) # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
-NUM_CORES_SERVER = 18
-NUM_CORES_LC = 16
-NUM_CORES_LC_GUARANTEED = 0
+NUM_CORES_SERVER = int(sys.argv[9])
+NUM_CORES_LC = int(sys.argv[10])
+NUM_CORES_LC_GUARANTEED = int(sys.argv[11])
 NUM_CORES_CLIENT = 16
 
-CALADAN_THRESHOLD = 10
+CALADAN_THRESHOLD = int(sys.argv[12])
 
-AVOID_LARGE_DOWNLOADS = False
+AVOID_LARGE_DOWNLOADS = int(sys.argv[13])
 
 DOWNLOAD_RAW = True
 
 ENABLE_ANTAGONIST = False
 
-IAS_DEBUG = True
+IAS_DEBUG = False
 
 ERIC_CSV_NAMING = True
-
 CSV_NAME_DIR = True
 
 # number of threads for antagonist
-threads = 18
+threads = 4
 # units of work each thread attempts at once
 work_units = 10
 # config string describing what type of antagonist worker, and other variables
@@ -96,8 +97,7 @@ antagonist_param = "randmem:{:d}:{:d}".format(antagonist_mem_size, random_seed)
 # SLO = 10 * (average RPC processing time + network RTT)
 NET_RTT = 10
 # slo = (ST_AVG + NET_RTT) * 10
-slo = 200
-# slo = 999999
+slo = int(sys.argv[13])
 
 # Verify configs #
 if OVERLOAD_ALG not in ["breakwater", "seda", "dagor", "nocontrol"]:
@@ -224,8 +224,7 @@ for agent in AGENTS:
             .format(KEY_LOCATION, USERNAME, agent, ARTIFACT_PATH, KERNEL_NAME)
     execute_local(cmd)
 
-# adding to server
-
+# ias.h at server for debug frequency
 ias_dir = "replace" if IAS_DEBUG else "replace_original"
 print("Replacing ias.h")
 # - server
@@ -344,12 +343,13 @@ for offered_load in OFFERED_LOADS:
     # - client
     print("\tExecuting client...")
     client_agent_sessions = []
+
     cmd = "cd ~/{} && sudo ./{}/breakwater/apps/netbench/netbench"\
             " {} client.config client {:d} {} {:d} {} {:d} {:d} {:d} {:d}"\
             " >stdout.out 2>&1".format(ARTIFACT_PATH, KERNEL_NAME, OVERLOAD_ALG, NUM_CONNS,
                     server_ip, ST_AVG, ST_DIST, slo ,NUM_AGENT, offered_load, LOADSHIFT)
     client_agent_sessions += execute_remote([client_conn], cmd, False)
-
+    
     sleep(1)
     
     # - agent
@@ -371,12 +371,6 @@ for offered_load in OFFERED_LOADS:
     # Wait for server to be killed
     server_session.recv_exit_status()
 
-    # kill shm query
-    # print("killing stress shm queries")
-    # cmd = "sudo killall -9 stress_shm_query"
-    # execute_remote([server_conn], cmd, True)
-    # server_shmqueryBW_session[0].recv_exit_status()
-    # server_shmquerySWAPTIONS_session[0].recv_exit_status()
     if ENABLE_ANTAGONIST:
         # kill antagonist
         print("killing server antagonist")
@@ -430,7 +424,6 @@ if DISABLE_WATCHDOG:
 if ENABLE_ANTAGONIST:
     output_prefix += "_antagonist"
     eric_prefix += "_antagonist"
-
 output_prefix += "_{:d}cores".format(NUM_CORES_SERVER)
 output_prefix += "_{:d}load".format(OFFERED_LOADS[0])
 # Assuming 16 cores consistently for now, so not adding cores to prefix
@@ -440,14 +433,19 @@ eric_prefix += "_{:d}nodes".format(len(NODES))
 
 output_prefix += "_{}_{:d}_nconn_{:d}".format(ST_DIST, ST_AVG, NUM_CONNS)
 
-header = "num_clients,offered_load,throughput,goodput,cpu,min,mean,p50,p90,p99,p999,p9999"\
-        ",max,reject_min,reject_mean,reject_p50,reject_p99,p1_win,mean_win,p99_win,p1_q,mean_q,p99_q"\
-		",mean_stime,p99_stime,server:rx_pps"\
-        ",server:tx_pps,server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
-        ",server:winu_rx_pps,server:winu_tx_pps,server:win_tx_wps,server:req_rx_pps"\
-        ",server:req_drop_rate,server:resp_tx_pps,client:min_tput,client:max_tput"\
-        ",client:winu_rx_pps,client:resp_rx_pps,client:req_tx_pps"\
-        ",client:win_expired_wps,client:req_dropped_rps"
+# Print Headers
+header = "num_clients,offered_load,throughput,goodput,cpu"\
+        ",min,mean,p50,p90,p99,p999,p9999,max"\
+        ",reject_min,reject_mean,reject_p50,reject_p99"\
+        ",p1_credit,mean_credit,p99_credit"\
+        ",p1_q,mean_q,p99_q,mean_stime,p99_stime,server:rx_pps,server:tx_pps"\
+        ",server:rx_bps,server:tx_bps,server:rx_drops_pps,server:rx_ooo_pps"\
+        ",server:cupdate_rx_pps,server:ecredit_tx_pps,server:credit_tx_cps"\
+        ",server:req_rx_pps,server:req_drop_rate,server:resp_tx_pps"\
+        ",client:min_tput,client:max_tput"\
+        ",client:ecredit_rx_pps,client:cupdate_tx_pps"\
+        ",client:resp_rx_pps,client:req_tx_pps"\
+        ",client:credit_expired_cps,client:req_dropped_rps"
 
 curr_date = datetime.now().strftime("%m_%d_%Y")
 curr_time = datetime.now().strftime("%H-%M-%S")
@@ -455,7 +453,7 @@ output_dir = "outputs/{}".format(curr_date)
 if not os.path.isdir(output_dir):
    os.makedirs(output_dir)
 
-run_dir = output_dir + "/{}".format(curr_time)
+run_dir = output_dir + "/" + curr_time
 if not os.path.isdir(run_dir):
    os.makedirs(run_dir)
 
@@ -488,11 +486,10 @@ cmd = "rm output.csv"
 execute_local(cmd, False)
 
 if not IAS_DEBUG or not AVOID_LARGE_DOWNLOADS:
-    # TODO put these all in one folder on server so I can just fetch with one command
-    print("iokernel log node 0")
-    cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
+        print("iokernel log node 0")
+        cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
             " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/{}/iokernel.node-0.log {}/".format(KEY_LOCATION, USERNAME, SERVERS[0], ARTIFACT_PATH, KERNEL_NAME, run_dir)
-    execute_local(cmd)
+        execute_local(cmd)
 
 print("stdout node 0")
 cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
@@ -517,7 +514,7 @@ cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o
         " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/stdout.out {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
 execute_local(cmd)
 if DOWNLOAD_RAW and not AVOID_LARGE_DOWNLOADS:
-    print("server dropped tasks")
+    print("server drop tasks")
     cmd = "rsync -azh --info=progress2 -e \"ssh -i {} -o StrictHostKeyChecking=no -o"\
         " UserKnownHostsFile=/dev/null\" {}@{}:~/{}/server_drop_tasks.csv {}/ >/dev/null".format(KEY_LOCATION, USERNAME, CLIENT, ARTIFACT_PATH, run_dir)
     execute_local(cmd)
@@ -544,7 +541,6 @@ if ENABLE_ANTAGONIST:
     execute_local(cmd)
 cmd = "cp configs/bw_config.h {}/".format(config_dir)
 execute_local(cmd)
-
 script_config = "overload algorithm: {}\n".format(OVERLOAD_ALG)
 script_config += "number of nodes: {}\n".format(len(NODES))
 script_config += "number of connections: {}\n".format(NUM_CONNS)
@@ -564,6 +560,7 @@ script_config += "RTT: {}\n".format(NET_RTT)
 script_config += "SLO: {}\n".format(slo)
 script_config += "Connections: {:d}\n".format(NUM_CONNS)
 script_config += "loadshift: {}\n".format(LOADSHIFT)
+
 cmd = "echo \"{}\" > {}/script.config".format(script_config, config_dir)
 execute_local(cmd)
 
@@ -572,6 +569,14 @@ if IAS_DEBUG and not AVOID_LARGE_DOWNLOADS:
     print("creating cores csv")
     cmd = "cd {} && python3 ../../../graph_scripts/create_corecsv.py".format(run_dir)
     execute_local(cmd)
+
+if CSV_NAME_DIR:
+    os.chdir(output_dir)
+    if os.path.isdir(eric_prefix):
+        print("error, desired directory name is already an output directory")
+        exit()
+    os.rename(curr_time, eric_prefix)
+    os.chdir("..")
 
 print("Done.")
 # TODO make sure the output stuff is consistent across run scripts
