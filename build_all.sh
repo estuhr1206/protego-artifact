@@ -45,16 +45,16 @@ export SHENANGODIR=$SCRIPTPATH/caladan
 # make
 # popd
 
-echo building BOEHMGC
-pushd gc
-./autogen.sh
-./configure --prefix=$SCRIPTPATH/gc/build --enable-static --enable-large-config --enable-handle-fork=no --enable-dlopen=no --disable-java-finalization --enable-threads=shenango --enable-shared=no --with-shenango=$SCRIPTPATH/caladan
-make install
-popd
+# echo building BOEHMGC
+# pushd gc
+# ./autogen.sh
+# ./configure --prefix=$SCRIPTPATH/gc/build --enable-static --enable-large-config --enable-handle-fork=no --enable-dlopen=no --disable-java-finalization --enable-threads=shenango --enable-shared=no --with-shenango=$SCRIPTPATH/caladan
+# make install
+# popd
 
-echo building PARSEC
-for p in x264 swaptions streamcluster; do
-	parsec/bin/parsecmgmt -a build -p $p -c gcc-shenango
-done
-export GCDIR=$SCRIPTPATH/gc/build/
-parsec/bin/parsecmgmt -a build -p swaptions -c gcc-shenango-gc
+# echo building PARSEC
+# for p in x264 swaptions streamcluster; do
+# 	parsec/bin/parsecmgmt -a build -p $p -c gcc-shenango
+# done
+# export GCDIR=$SCRIPTPATH/gc/build/
+# parsec/bin/parsecmgmt -a build -p swaptions -c gcc-shenango-gc

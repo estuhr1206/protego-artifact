@@ -39,14 +39,18 @@ execute_local(cmd)
 #    bimod: bimodal
 ST_DIST = "exp"
 
-SCHEDULER = "ias"
+SCHEDULER = "simple"
+
+# TODO
+# enable_directpath 1 vs enable_directpath qs
+# how does this translate? hard to search files when trying to just be looking at one commit
 
 # List of offered load
 # OFFERED_LOADS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
 #                 110, 120, 130, 140, 150, 160]
 
-# OFFERED_LOADS = [400000, 800000, 1200000]
-OFFERED_LOADS = [400000, 600000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
+OFFERED_LOADS = [400000, 800000, 1200000]
+# OFFERED_LOADS = [400000, 600000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000, 1400000, 1500000, 1600000, 1700000, 1800000, 2000000, 3000000]
 # loadshift = 1 for load shifts in netbench.cc
 LOADSHIFT = 0
 # OFFERED_LOADS = [850000]
@@ -55,12 +59,12 @@ LOADSHIFT = 0
 #     OFFERED_LOADS[i] *= 10000
 
 ENABLE_DIRECTPATH = True
-SPIN_SERVER = True # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
+SPIN_SERVER = False # off in protego synthetic, but on in breakwater (synthetic and memcached). Don't see description in papers
 DISABLE_WATCHDOG = False
 
 NUM_CORES_SERVER = 18
 NUM_CORES_LC = 16
-NUM_CORES_LC_GUARANTEED = 16
+NUM_CORES_LC_GUARANTEED = 0
 NUM_CORES_CLIENT = 16
 
 CALADAN_THRESHOLD = 10
@@ -149,7 +153,7 @@ def generate_shenango_config(is_server ,conn, ip, netmask, gateway, num_cores,
         config_string += "\nruntime_spinning_kthreads 0"
 
     if directpath:
-        config_string += "\nenable_directpath 1"
+        config_string += "\nenable_directpath qs"
 
     if disable_watchdog:
         config_string += "\ndisable_watchdog 1"
@@ -228,13 +232,13 @@ for agent in AGENTS:
 
 # adding to server
 
-ias_dir = "replace" if IAS_DEBUG else "replace_original"
-print("Replacing ias.h")
-# - server
-cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}/ias.h"\
-        " {}@{}:~/{}/{}/iokernel/"\
-        .format(KEY_LOCATION, ias_dir, USERNAME, SERVERS[0], ARTIFACT_PATH, KERNEL_NAME)
-execute_local(cmd)
+# ias_dir = "replace" if IAS_DEBUG else "replace_original"
+# print("Replacing ias.h")
+# # - server
+# cmd = "scp -P 22 -i {} -o StrictHostKeyChecking=no {}/ias.h"\
+#         " {}@{}:~/{}/{}/iokernel/"\
+#         .format(KEY_LOCATION, ias_dir, USERNAME, SERVERS[0], ARTIFACT_PATH, KERNEL_NAME)
+# execute_local(cmd)
 
 # Generating config files
 print("Generating config files...")
