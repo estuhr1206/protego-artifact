@@ -6,4 +6,5 @@
 	url = https://github.com/shenango/parsec.git
 [submodule "caladan"]
 	path = caladan
-	url = https://github.com/shenango/caladan.git
+	url = https://github.com/estuhr1206/caladan-policies.git
+	branch = breakwater
